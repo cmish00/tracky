@@ -4,7 +4,7 @@ Your adorable buddy who helps you clock in and out, manage teams, and fill forms
 Grab the [Latest Release](https://github.com/cmish00/tracky/releases/latest)
 
 ## Bonus
-Built-In integration with some gaming communities.
+**Built-In integration with some gaming communities.**
 - Users can enter a "team code" to gain access to pre-configured departments with additional options like pre-filled form generation!
 
 # Previews
