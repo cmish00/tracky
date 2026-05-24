@@ -21,6 +21,41 @@ Grab the [Latest Release](https://github.com/cmish00/tracky/releases/latest)
 # Docker Compose
 **Install through a Docker Compose manager like Portainer.** | [Docker Hub](https://hub.docker.com/repository/docker/cmish00/tracky-frontend/)
 ```
-pending
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - /local/path/to/your/data:/data # a directory on your computer
+    restart: unless-stopped
+
+  backend:
+    image: cmish00/tracky-backend:latest
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3000 # not touched
+      - AUTH_SECRET=trk_8f6b7a2e4d91d0a73f5j92b1g86d40c9b7e51f3a24wz8e66
+      - ADMIN_USERNAME=admin # default admin account username
+      - ADMIN_PASSWORD=admin # default admin account password
+      - CORS_ORIGINS=* #optional comma seperated list of allowed URLs
+    ports:
+      - "3100:3000" # public_port:3000
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    image: cmish00/tracky-frontend:latest
+    environment:
+      - APP_NAME=TRACKY
+      - APP_DESC=Department Time Tracking Control Panel
+      - TAB_TITLE=Tracky
+      - API_BASE=
+    ports:
+      - "8100:80" # web_ui_port:80
+    depends_on:
+      - backend
+    restart: unless-stopped
+
 
 ```
