@@ -1,26 +1,70 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
 const { createClient } = require('redis');
 
 const app = express();
 app.use(express.json({ limit: '200kb' }));
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORTABLE_MODE = process.env.TRACKY_PORTABLE === '1' || Boolean(process.pkg);
+const PORT = parseInt(process.env.PORT || (PORTABLE_MODE ? '8765' : '3000'), 10);
+const HOST = process.env.HOST || (PORTABLE_MODE ? '127.0.0.1' : undefined);
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const TOKEN_SECRET = process.env.AUTH_SECRET || 'tracky-development-secret-change-me';
 const DEFAULT_ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+const LOCAL_DATA_FILE = process.env.TRACKY_DATA_FILE ||
+  path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Tracky', 'data.json');
+const STATIC_DIR = process.env.TRACKY_STATIC_DIR ||
+  (PORTABLE_MODE ? path.join(path.dirname(process.execPath), 'web') : '');
 const TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
 const PATROL_RESUME_WINDOW_MS = 5 * 60 * 1000;
 const USERS_INDEX_KEY = 'tracky:users:index';
 const TEAMS_INDEX_KEY = 'tracky:teams:index';
+const SETTINGS_KEY = 'tracky:settings';
 const PERSONAL_TEAM_ID = 'personal';
 const PERSONAL_TEAM_NAME = 'Personal Departments';
 const DOJ_TEAM_ID = 'doj';
-const CURRENT_CATALOG_VERSION = '2026-05-teams-v1';
+const CURRENT_CATALOG_VERSION = '2026-05-doj-profile-v2';
+const DOJ_CATALOG_VERSION = '2026-05-gruppe-sechs-v4';
+const BCSO_RANKS = [
+  'Probationary Reserve Deputy', 'Reserve Deputy', 'Senior Reserve Deputy', 'Probationary Deputy',
+  'Deputy I', 'Deputy II', 'Deputy III', 'Senior Deputy', 'Master Deputy', 'Corporal',
+  'Senior Corporal', 'Sergeant', 'Staff Sergeant', 'Master Sergeant', 'Lieutenant', 'Captain',
+  'Sheriff Major', 'Sheriff Commander', 'Sheriff Colonel'
+];
+const DOJ_FORM_CONFIGS = {
+  'civilian-department': {
+    type: 'civilian',
+    url: 'https://docs.google.com/forms/d/e/1FAIpQLSfSfEPLCe05DXIv2Jks2BIzIG4tkeRkXgafqGe9QMt8TSICdA/viewform'
+  },
+  'los-santos-police-department': {
+    type: 'lspd',
+    url: 'https://docs.google.com/forms/d/e/1FAIpQLSe-C26eG0eMZXtr33hmpTC0bBChBiL2h-XPZ775Y0uIn24yNA/viewform'
+  },
+  'san-andreas-highway-patrol': {
+    type: 'sahp',
+    url: 'https://docs.google.com/forms/d/e/1FAIpQLSfaXvvG36o9DJtSH2Qe6t7w4bLYXIwVeOWt_zZT7sYRQOHn7A/viewform'
+  },
+  'blaine-county-sheriff-s-office': {
+    type: 'bcso',
+    url: 'https://docs.google.com/forms/d/e/1FAIpQLSecJZZIkatFAGCOrKws0HvTLJfVfLiTT9vcs3EyWjt8NpA_Vw/viewform'
+  },
+  'communications-department': {
+    type: 'communications',
+    url: 'https://docs.google.com/forms/d/e/1FAIpQLSdTpOKPlM8ELSyer4Q_tQdQmvjKrr_xcWn0ANVKGY0ldUOXrw/viewform'
+  },
+  'los-santos-fire-department': {
+    type: 'fire',
+    url: 'https://docs.google.com/forms/d/e/1FAIpQLSfl2kiAiZONQJTjTmtmYgWsxGK6iJxNJXiQ15x4KCWida9A2g/viewform'
+  }
+};
 const loginAttempts = new Map();
 
 const configuredAccessUrls = String(process.env.ACCESS_URL || process.env.CORS_ORIGINS || '').trim();
@@ -50,8 +94,88 @@ app.use((req, res, next) => {
 });
 app.use(cors((req, callback) => callback(null, { origin: allowAllOrigins || isAllowedOrigin(req) })));
 
-const dataClient = createClient({ url: REDIS_URL });
-dataClient.on('error', error => console.error('Redis connection error:', error.message));
+const createLocalDataClient = filePath => {
+  let data = { strings: {}, hashes: {}, sets: {} };
+  let writes = Promise.resolve();
+  const write = () => {
+    const snapshot = JSON.stringify(data, null, 2);
+    writes = writes.then(async () => {
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      const temporaryFile = `${filePath}.tmp`;
+      await fs.promises.writeFile(temporaryFile, snapshot, 'utf8');
+      await fs.promises.rename(temporaryFile, filePath);
+    });
+    return writes;
+  };
+  const contains = key => ['strings', 'hashes', 'sets'].some(bucket =>
+    Object.prototype.hasOwnProperty.call(data[bucket], key)
+  );
+  return {
+    on: () => {},
+    connect: async () => {
+      try {
+        const stored = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+        data = {
+          strings: stored.strings || {},
+          hashes: stored.hashes || {},
+          sets: stored.sets || {}
+        };
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    },
+    get: async key => Object.prototype.hasOwnProperty.call(data.strings, key) ? data.strings[key] : null,
+    set: async (key, value) => {
+      data.strings[key] = String(value);
+      await write();
+    },
+    hGetAll: async key => ({ ...(data.hashes[key] || {}) }),
+    hSet: async (key, fieldOrValues, value) => {
+      const values = typeof fieldOrValues === 'object'
+        ? fieldOrValues
+        : { [fieldOrValues]: value };
+      const current = data.hashes[key] || {};
+      Object.entries(values).forEach(([field, item]) => {
+        current[field] = String(item);
+      });
+      data.hashes[key] = current;
+      await write();
+    },
+    sAdd: async (key, ...values) => {
+      const members = new Set(data.sets[key] || []);
+      values.forEach(value => members.add(String(value)));
+      data.sets[key] = [...members];
+      await write();
+    },
+    sMembers: async key => [...(data.sets[key] || [])],
+    sRem: async (key, ...values) => {
+      const removals = new Set(values.map(value => String(value)));
+      data.sets[key] = (data.sets[key] || []).filter(value => !removals.has(value));
+      await write();
+    },
+    exists: async key => contains(key) ? 1 : 0,
+    rename: async (source, destination) => {
+      ['strings', 'hashes', 'sets'].forEach(bucket => {
+        if (Object.prototype.hasOwnProperty.call(data[bucket], source)) {
+          data[bucket][destination] = data[bucket][source];
+          delete data[bucket][source];
+        }
+      });
+      await write();
+    },
+    del: async (...keys) => {
+      keys.forEach(key => {
+        delete data.strings[key];
+        delete data.hashes[key];
+        delete data.sets[key];
+      });
+      await write();
+    }
+  };
+};
+
+const dataClient = PORTABLE_MODE ? createLocalDataClient(LOCAL_DATA_FILE) : createClient({ url: REDIS_URL });
+dataClient.on('error', error => console.error('Storage connection error:', error.message));
 
 const slugify = value => String(value || '')
   .trim()
@@ -61,6 +185,13 @@ const slugify = value => String(value || '')
 const normalizeUsername = value => String(value || '').trim().toLowerCase();
 const normalizeName = value => String(value || '').trim().toLowerCase();
 const cleanText = (value, maxLength) => String(value || '').trim().slice(0, maxLength);
+const validateUsername = value => {
+  const normalized = normalizeUsername(value);
+  if (!/^[a-z0-9_.-]{3,40}$/.test(normalized)) {
+    throw new HttpError(400, 'Username must be 3-40 characters and use letters, numbers, dots, dashes, or underscores.');
+  }
+  return normalized;
+};
 
 const BASE_DEPARTMENTS = [
   {
@@ -69,13 +200,13 @@ const BASE_DEPARTMENTS = [
       { name: '24/7 Supermarket', group: 'Businesses' },
       { name: 'Ammu-Nation', group: 'Businesses' },
       { name: "Casey's Highway Clearance", group: 'Businesses' },
-      { name: 'Grouppe Sechs Security', group: 'Businesses' },
+      { name: 'Gruppe Sechs Security', id: 'civilian-department-grouppe-sechs-security', group: 'Businesses' },
       { name: 'Humane Labs & Research', group: 'Businesses' },
       { name: 'Jetsam Holdings', group: 'Businesses' },
       { name: "Roger's Salvage & Scrap", group: 'Businesses' },
       { name: 'Los Santos Transit', group: 'Businesses' },
       { name: 'Los Santos Department of Public Works', group: 'Businesses' },
-      { name: 'McGill-Olson Construction', group: 'Businesses' },
+      { name: 'McGill Olsen Construction', id: 'civilian-department-mcgill-olson-construction', group: 'Businesses' },
       { name: 'Merryweather Security', group: 'Businesses' },
       { name: 'Over The Tap Liquor', group: 'Businesses' },
       { name: 'Premium Deluxe Motorsports', group: 'Businesses' },
@@ -105,29 +236,32 @@ const BASE_DEPARTMENTS = [
   {
     name: "Blaine County Sheriff's Office",
     subdivisions: [
-      { name: 'Wildlife Rangers' },
-      { name: 'Warrant Services Unit' },
-      { name: 'Criminal Investigations Division' },
-      { name: 'Traffic Enforcement Division' },
-      { name: 'Canine Unit' }
+      { name: 'WSU' },
+      { name: 'WLR' },
+      { name: 'CID' },
+      { name: 'TED' },
+      { name: 'Canine' }
     ]
   },
   {
     name: 'San Andreas Highway Patrol',
     subdivisions: [
-      { name: 'Bureau of Air and Coastal Operations' },
-      { name: 'Bureau of Special Operations' },
-      { name: 'Bureau of Transportation and Enforcement' }
+      { name: 'BACO' },
+      { name: 'Investigations' },
+      { name: 'Canine' },
+      { name: 'DUI' },
+      { name: 'MBU' },
+      { name: 'CVE' },
+      { name: 'MRU' }
     ]
   },
   {
     name: 'Los Santos Fire Department',
     subdivisions: [
       { name: 'Division of Special Operations' },
-      { name: 'Lifeguard Division' },
-      { name: 'Office of Fire Investigations' },
-      { name: 'San Andreas Forestry Services' },
-      { name: 'Tactical Support Unit' }
+      { name: 'Office of Fire Investigation' },
+      { name: 'TSU' },
+      { name: 'SanFire' }
     ]
   },
   {
@@ -162,9 +296,11 @@ const createDefaultDepartment = (department, teamId = DOJ_TEAM_ID, namespaceIds 
   color: '#4a5568',
   requiredHours: 0,
   subdivisions: department.subdivisions.map(subdivision => ({
-    id: namespaceIds
-      ? `${teamId}-${slugify(department.name)}-${slugify(subdivision.name)}`
-      : `${slugify(department.name)}-${slugify(subdivision.name)}`,
+    id: subdivision.id
+      ? (namespaceIds ? `${teamId}-${subdivision.id}` : subdivision.id)
+      : namespaceIds
+        ? `${teamId}-${slugify(department.name)}-${slugify(subdivision.name)}`
+        : `${slugify(department.name)}-${slugify(subdivision.name)}`,
     name: subdivision.name,
     ...(subdivision.group ? { group: subdivision.group } : {}),
     enabled: true,
@@ -214,6 +350,15 @@ const loadJson = async (key, fallback) => {
   return value ? JSON.parse(value) : fallback;
 };
 const saveJson = (key, value) => dataClient.set(key, JSON.stringify(value));
+const getSettings = async () => {
+  const settings = await loadJson(SETTINGS_KEY, {});
+  return { allowRegistration: settings.allowRegistration === true };
+};
+const saveSettings = async updates => {
+  const settings = { ...await getSettings(), ...updates };
+  await saveJson(SETTINGS_KEY, settings);
+  return settings;
+};
 const parseList = value => {
   try {
     const parsed = Array.isArray(value) ? value : JSON.parse(value || '[]');
@@ -261,7 +406,24 @@ const listTeams = async () => {
   return teams.filter(Boolean).sort((left, right) => left.name.localeCompare(right.name));
 };
 const ensureSystemTeam = async () => {
-  if (!await getTeam(DOJ_TEAM_ID)) await saveTeam(createDojTeam());
+  const existing = await getTeam(DOJ_TEAM_ID);
+  if (!existing) {
+    await saveTeam({ ...createDojTeam(), catalogVersion: DOJ_CATALOG_VERSION });
+    return;
+  }
+  if (existing.catalogVersion !== DOJ_CATALOG_VERSION) {
+    await saveTeam({
+      ...existing,
+      name: 'Department of Justice RP',
+      joinKey: 'DOJ',
+      personalized: false,
+      lockDepartments: true,
+      lockSubdivisions: true,
+      protected: true,
+      catalogVersion: DOJ_CATALOG_VERSION,
+      departments: createDefaultDepartments()
+    });
+  }
 };
 const getUserTeamIds = user => {
   if (user && Object.prototype.hasOwnProperty.call(user, 'teamIds') && user.teamIds !== '') {
@@ -278,10 +440,15 @@ const getDojProfile = user => {
     const profile = JSON.parse(user?.dojProfile || '{}');
     return {
       communityName: cleanText(profile.communityName, 80),
+      email: cleanText(profile.email, 160),
+      websiteId: cleanText(profile.websiteId, 80),
+      idn: cleanText(profile.idn, 80),
+      investigatorRank: cleanText(profile.investigatorRank, 80),
+      bcsoRank: BCSO_RANKS.includes(profile.bcsoRank) ? profile.bcsoRank : '',
       callsigns: profile.callsigns && typeof profile.callsigns === 'object' ? profile.callsigns : {}
     };
   } catch (error) {
-    return { communityName: '', callsigns: {} };
+    return { communityName: '', email: '', websiteId: '', idn: '', investigatorRank: '', bcsoRank: '', callsigns: {} };
   }
 };
 const getUserTeamOrder = user => {
@@ -496,10 +663,7 @@ const initializeWorkspace = async username => {
   }
 };
 const createUser = async ({ username, password, role = 'user', teamIds = [DOJ_TEAM_ID] }) => {
-  const normalized = normalizeUsername(username);
-  if (!/^[a-z0-9_.-]{3,40}$/.test(normalized)) {
-    throw new HttpError(400, 'Username must be 3-40 characters and use letters, numbers, dots, dashes, or underscores.');
-  }
+  const normalized = validateUsername(username);
   if (String(password || '').length < 6) {
     throw new HttpError(400, 'Password must be at least 6 characters.');
   }
@@ -514,11 +678,34 @@ const createUser = async ({ username, password, role = 'user', teamIds = [DOJ_TE
     teamIds: JSON.stringify(teamIds.filter(teamId => teamId !== PERSONAL_TEAM_ID)),
     teamOrder: JSON.stringify([...teamIds.filter(teamId => teamId !== PERSONAL_TEAM_ID), PERSONAL_TEAM_ID]),
     disabledTeamIds: JSON.stringify([]),
-    dojProfile: JSON.stringify({ communityName: '', callsigns: {} })
+    dojProfile: JSON.stringify({ communityName: '', email: '', websiteId: '', idn: '', investigatorRank: '', bcsoRank: '', callsigns: {} })
   });
   await dataClient.sAdd(USERS_INDEX_KEY, normalized);
   await initializeWorkspace(normalized);
   return getUser(normalized);
+};
+const renameUser = async (currentUsername, requestedUsername) => {
+  const previous = normalizeUsername(currentUsername);
+  const next = validateUsername(requestedUsername);
+  if (previous === next) return getUser(previous);
+  if (await getUser(next) ||
+    await dataClient.exists(departmentKey(next)) ||
+    await dataClient.exists(entryKey(next)) ||
+    await dataClient.exists(catalogVersionKey(next))) {
+    throw new HttpError(409, 'Username is already in use.');
+  }
+  const user = await getUser(previous);
+  if (!user) throw new HttpError(404, 'User not found.');
+  await dataClient.hSet(userKey(next), { ...user, username: next });
+  for (const keyFactory of [departmentKey, entryKey, catalogVersionKey]) {
+    if (await dataClient.exists(keyFactory(previous))) {
+      await dataClient.rename(keyFactory(previous), keyFactory(next));
+    }
+  }
+  await dataClient.sRem(USERS_INDEX_KEY, previous);
+  await dataClient.sAdd(USERS_INDEX_KEY, next);
+  await dataClient.del(userKey(previous));
+  return getUser(next);
 };
 const listUsers = async () => {
   const usernames = await dataClient.sMembers(USERS_INDEX_KEY);
@@ -619,6 +806,209 @@ const saveEntries = (username, entries) => saveJson(entryKey(username), entries)
 const findDepartment = (departments, departmentId) => departments.find(department => department.id === departmentId);
 const findSubdivision = (department, subdivisionId) =>
   department?.subdivisions.find(subdivision => subdivision.id === subdivisionId);
+const setFormValue = (params, key, value) => params.set(key, String(value ?? ''));
+const setOptionalFormValue = (params, key, value) => {
+  const text = String(value ?? '').trim();
+  if (text) params.set(key, text);
+};
+const setUtcDateFields = (params, prefix, value) => {
+  const date = new Date(value);
+  setFormValue(params, `${prefix}_hour`, String(date.getUTCHours()).padStart(2, '0'));
+  setFormValue(params, `${prefix}_minute`, String(date.getUTCMinutes()).padStart(2, '0'));
+  setFormValue(params, `${prefix}_year`, date.getUTCFullYear());
+  setFormValue(params, `${prefix}_month`, date.getUTCMonth() + 1);
+  setFormValue(params, `${prefix}_day`, date.getUTCDate());
+};
+const durationParts = milliseconds => {
+  const minutes = Math.max(0, Math.round(milliseconds / 60000));
+  return {
+    hours: String(Math.floor(minutes / 60)).padStart(2, '0'),
+    minutes: String(minutes % 60).padStart(2, '0')
+  };
+};
+const setDurationFields = (params, prefix, milliseconds) => {
+  const duration = durationParts(milliseconds);
+  setFormValue(params, `${prefix}_hour`, duration.hours);
+  setFormValue(params, `${prefix}_minute`, duration.minutes);
+  setFormValue(params, `${prefix}_second`, '00');
+};
+const groupedSubdivisionDurations = entry => {
+  const groups = [];
+  const byId = new Map();
+  entrySegments(entry).filter(segment => segment.subdivisionId).forEach(segment => {
+    const current = byId.get(segment.subdivisionId) || {
+      subdivisionId: segment.subdivisionId,
+      subdivisionName: segment.subdivisionName,
+      milliseconds: 0
+    };
+    current.milliseconds += Math.max(0, new Date(segment.endAt || entry.endAt).getTime() - new Date(segment.startAt).getTime());
+    if (!byId.has(segment.subdivisionId)) groups.push(current);
+    byId.set(segment.subdivisionId, current);
+  });
+  return groups;
+};
+const formIdentity = (profile, department) =>
+  [profile.communityName, profile.callsigns[department.id]].filter(Boolean).join(' ');
+const civilianFormName = name => {
+  const formNames = {
+    '24/7 supermarket': '24/7 Convenience Stores',
+    'ammu-nation': 'Ammu-Nation Weapon Store',
+    "casey's highway clearance": "Casey's Highway Clearance & Auto Repairs",
+    'grouppe sechs security': 'Gruppe Sechs Security',
+    'gruppe sechs security': 'Gruppe Sechs Security',
+    'humane labs & research': 'Humane Labs & Research',
+    'jetsam holdings': 'Jetsam Holdings',
+    "roger's salvage & scrap": 'Rogers Salvage & Scrap',
+    'los santos transit': 'Los Santos Transit',
+    'los santos department of public works': 'Los Santos Department of Public Works',
+    'mcgill olsen construction': 'McGill-Olsen Construction',
+    'mcgill-olson construction': 'McGill-Olsen Construction',
+    'merryweather security': 'Merryweather Security',
+    'over the tap liquor': 'Over The Tap Liquor',
+    'premium deluxe motorsports': 'Premium Deluxe Motorsports',
+    'ron oil & logistics': 'Ron Oil & Logistics',
+    'san andreas medical union': 'San Andreas Medical Union',
+    'the union depository': 'The Union Depository',
+    'san andreas foods': 'San Andreas Foods',
+    'weazel news': 'Weazel News',
+    'ballas street gang': 'Ballas Street Gang',
+    'families street gang': 'Families Street Gang',
+    'vagos street gang': 'Vagos Street Gang',
+    'lost mc': 'Lost MC',
+    'reapers poison mc': 'Reapers Poison MC',
+    'the dukes family': 'The Dukes Family',
+    'velenza syndicate': 'Valenza Syndicate'
+  };
+  if (String(name || '').toLowerCase().startsWith('zero ')) return 'Zero Yonin';
+  return formNames[normalizeName(name)] || name;
+};
+const buildDojFormUrl = (entry, department, profile) => {
+  const config = DOJ_FORM_CONFIGS[department.id];
+  if (!config) throw new HttpError(400, 'No Google Form is configured for that DOJ department.');
+  const params = new URLSearchParams({ usp: 'pp_url' });
+  const subdivisions = groupedSubdivisionDurations(entry);
+  const subdivisionDurations = new Map(subdivisions.map(subdivision => [normalizeName(subdivision.subdivisionName), subdivision.milliseconds]));
+  const totalMilliseconds = Math.max(0, new Date(entry.endAt).getTime() - new Date(entry.startAt).getTime());
+  setOptionalFormValue(params, 'emailAddress', profile.email);
+  if (config.type === 'civilian') {
+    setFormValue(params, 'entry.1076518144', 'UTC -0 (GMT)');
+    setOptionalFormValue(params, 'entry.1281296250', formIdentity(profile, department));
+    setOptionalFormValue(params, 'entry.441531994', profile.websiteId);
+    setUtcDateFields(params, 'entry.1173078942', entry.startAt);
+    setDurationFields(params, 'entry.1727523701', totalMilliseconds);
+    setFormValue(params, 'entry.345451391', subdivisions.length ? 'Yes' : 'No');
+    const fields = [
+      ['entry.91681594', 'entry.1410414271'],
+      ['entry.810117208', 'entry.275813669'],
+      ['entry.1005807483', 'entry.884574783']
+    ];
+    setFormValue(params, 'entry.210147639', subdivisions.length > 1 ? 'Yes' : 'No');
+    setFormValue(params, 'entry.70281007', subdivisions.length > 2 ? 'Yes' : 'No');
+    subdivisions.slice(0, 3).forEach((subdivision, index) => {
+      setFormValue(params, fields[index][0], civilianFormName(subdivision.subdivisionName));
+      setDurationFields(params, fields[index][1], subdivision.milliseconds);
+    });
+  }
+  if (config.type === 'lspd') {
+    setOptionalFormValue(params, 'entry.998812919', formIdentity(profile, department));
+    setOptionalFormValue(params, 'entry.699618360', profile.websiteId);
+    setFormValue(params, 'entry.952718778', 'UTC (GMT)');
+    setFormValue(params, 'entry.1132611911', 'Patrol Log');
+    setUtcDateFields(params, 'entry.1056448932', entry.startAt);
+    setUtcDateFields(params, 'entry.483572440', entry.endAt);
+    const lspdNames = {
+      'port authority': 'Port Authority',
+      'special intelligence division': 'Special Intelligence Division',
+      'traffic enforcement unit': 'Traffic Enforcement'
+    };
+    setFormValue(params, 'entry.1338139738', subdivisions.length
+      ? (lspdNames[normalizeName(subdivisions[0].subdivisionName)] || subdivisions[0].subdivisionName)
+      : 'N/A');
+    const sidDuration = subdivisionDurations.get('special intelligence division');
+    if (sidDuration !== undefined) {
+      setOptionalFormValue(params, 'entry.180325416', profile.idn);
+      setOptionalFormValue(params, 'entry.1239803050', profile.investigatorRank);
+      setDurationFields(params, 'entry.998704443', sidDuration);
+    }
+    if (subdivisionDurations.has('port authority')) setDurationFields(params, 'entry.1462695973', subdivisionDurations.get('port authority'));
+    if (subdivisionDurations.has('traffic enforcement unit')) setDurationFields(params, 'entry.219664856', subdivisionDurations.get('traffic enforcement unit'));
+  }
+  if (config.type === 'sahp') {
+    setOptionalFormValue(params, 'entry.44090836', formIdentity(profile, department));
+    setOptionalFormValue(params, 'entry.1185242731', profile.websiteId);
+    setFormValue(params, 'entry.926732721', 'GMT');
+    setUtcDateFields(params, 'entry.874254809', entry.startAt);
+    setUtcDateFields(params, 'entry.471559059', entry.endAt);
+    setFormValue(params, 'entry.2019176256', subdivisions.length ? 'Yes' : 'No');
+    setFormValue(params, 'entry.539881772', 'Standard Patrol');
+    const sahpFields = {
+      baco: 'entry.754081532',
+      investigations: 'entry.1482741082',
+      canine: 'entry.1099238848',
+      dui: 'entry.1352450409',
+      mbu: 'entry.1263679487',
+      cve: 'entry.1919106217',
+      mru: 'entry.579749179'
+    };
+    Object.entries(sahpFields).forEach(([name, prefix]) => {
+      if (subdivisionDurations.has(name)) setDurationFields(params, prefix, subdivisionDurations.get(name));
+    });
+  }
+  if (config.type === 'bcso') {
+    setOptionalFormValue(params, 'entry.1019179407', profile.websiteId);
+    setOptionalFormValue(params, 'entry.214679648', profile.bcsoRank);
+    setOptionalFormValue(params, 'entry.805651499', formIdentity(profile, department));
+    setFormValue(params, 'entry.324817261', 'GMT');
+    setUtcDateFields(params, 'entry.243689543', entry.startAt);
+    setUtcDateFields(params, 'entry.1076382024', entry.endAt);
+    setDurationFields(params, 'entry.980582373', totalMilliseconds);
+    setFormValue(params, 'entry.1610264503', subdivisions.length ? 'Yes' : 'No');
+    const bcsoFields = {
+      wsu: 'entry.1284273733',
+      wlr: 'entry.1548375218',
+      cid: 'entry.313224238',
+      ted: 'entry.1471195366',
+      canine: 'entry.1881504976'
+    };
+    Object.entries(bcsoFields).forEach(([name, prefix]) => {
+      if (subdivisionDurations.has(name)) setDurationFields(params, prefix, subdivisionDurations.get(name));
+    });
+  }
+  if (config.type === 'communications') {
+    setOptionalFormValue(params, 'entry.1504138626', formIdentity(profile, department));
+    setOptionalFormValue(params, 'entry.381718269', profile.websiteId);
+    setFormValue(params, 'entry.725494750', 'UTC');
+    setUtcDateFields(params, 'entry.1201164071', entry.startAt);
+    setUtcDateFields(params, 'entry.1618657701', entry.endAt);
+    setFormValue(params, 'entry.1284541558', 'Patrol Activity');
+  }
+  if (config.type === 'fire') {
+    setOptionalFormValue(params, 'entry.209084214', profile.websiteId);
+    setOptionalFormValue(params, 'entry.1827709301', formIdentity(profile, department));
+    setFormValue(params, 'entry.877197655', 'UTC');
+    setUtcDateFields(params, 'entry.292361965', entry.startAt);
+    setUtcDateFields(params, 'entry.1465251400', entry.endAt);
+    setFormValue(params, 'entry.947689798', 'Patrol Log [Patrols, Activations, Ridealongs]');
+    setFormValue(params, 'entry.1391636004', subdivisions.length ? 'Yes' : 'No');
+    const fireFields = {
+      'division of special operations': 'entry.1033506814',
+      'office of fire investigation': 'entry.177072469',
+      'office of fire investigations': 'entry.177072469',
+      tsu: 'entry.1772682038',
+      'tactical support unit': 'entry.1772682038',
+      sanfire: 'entry.789182892'
+    };
+    Object.entries(fireFields).forEach(([name, prefix]) => {
+      if (subdivisionDurations.has(name)) setDurationFields(params, prefix, subdivisionDurations.get(name));
+    });
+  }
+  const query = params.toString()
+    .replace(/\+/g, '%20')
+    .replace(/%28/gi, '(')
+    .replace(/%29/gi, ')')
+    .replace(/%40/gi, '@');
+  return `${config.url}?${query}`;
+};
 const resolveAssignment = async (username, departmentId, subdivisionId, options = {}) => {
   const departments = await getDepartments(username);
   const department = findDepartment(departments, departmentId);
@@ -634,6 +1024,11 @@ const resolveAssignment = async (username, departmentId, subdivisionId, options 
 };
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', app: 'Tracky' }));
+
+app.get('/api/auth/registration', asyncRoute(async (req, res) => {
+  const settings = await getSettings();
+  res.json({ enabled: settings.allowRegistration });
+}));
 
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const username = normalizeUsername(req.body.username);
@@ -660,6 +1055,33 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   });
 }));
 
+app.post('/api/auth/register', asyncRoute(async (req, res) => {
+  const settings = await getSettings();
+  if (!settings.allowRegistration) {
+    throw new HttpError(403, 'Account registration is not currently available.');
+  }
+  const requestedKey = cleanText(req.body.teamKey, 100).toLowerCase();
+  let teamIds = [];
+  if (requestedKey) {
+    const team = (await listTeams()).find(candidate =>
+      String(candidate.joinKey || '').trim().toLowerCase() === requestedKey
+    );
+    if (!team) throw new HttpError(404, 'No team matches that key.');
+    teamIds = [team.id];
+  }
+  const user = await createUser({
+    username: req.body.username,
+    password: req.body.password,
+    role: 'user',
+    teamIds
+  });
+  const safeUser = publicUser(user);
+  res.status(201).json({
+    token: signToken({ username: user.username, exp: Date.now() + TOKEN_LIFETIME_MS }),
+    user: safeUser
+  });
+}));
+
 app.get('/api/auth/me', requireAuth, (req, res) => res.json(req.user));
 
 app.patch('/api/auth/password', requireAuth, asyncRoute(async (req, res) => {
@@ -678,6 +1100,15 @@ app.patch('/api/auth/password', requireAuth, asyncRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
+app.patch('/api/auth/username', requireAuth, asyncRoute(async (req, res) => {
+  const user = await renameUser(req.user.username, req.body.username);
+  const safeUser = publicUser(user);
+  res.json({
+    token: signToken({ username: user.username, exp: Date.now() + TOKEN_LIFETIME_MS }),
+    user: safeUser
+  });
+}));
+
 app.patch('/api/auth/doj-profile', requireAuth, asyncRoute(async (req, res) => {
   const user = await getUser(req.user.username);
   if (!userHasTeam(user, DOJ_TEAM_ID)) {
@@ -686,6 +1117,17 @@ app.patch('/api/auth/doj-profile', requireAuth, asyncRoute(async (req, res) => {
   const communityName = cleanText(req.body.communityName, 80);
   if (communityName && !/^[A-Za-z][A-Za-z'-]* [A-Za-z]\.$/.test(communityName)) {
     throw new HttpError(400, 'Community name must be formatted like Cleo M.');
+  }
+  const email = cleanText(req.body.email, 160);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpError(400, 'Enter a valid email address.');
+  }
+  const websiteId = cleanText(req.body.websiteId, 80);
+  const idn = cleanText(req.body.idn, 80);
+  const investigatorRank = cleanText(req.body.investigatorRank, 80);
+  const bcsoRank = cleanText(req.body.bcsoRank, 80);
+  if (bcsoRank && !BCSO_RANKS.includes(bcsoRank)) {
+    throw new HttpError(400, 'Choose a valid BCSO rank.');
   }
   const dojTeam = await getTeam(DOJ_TEAM_ID);
   const allowedCallsignIds = new Set();
@@ -700,7 +1142,7 @@ app.patch('/api/auth/doj-profile', requireAuth, asyncRoute(async (req, res) => {
       if (callsign) callsigns[id] = callsign;
     }
   });
-  const profile = { communityName, callsigns };
+  const profile = { communityName, email, websiteId, idn, investigatorRank, bcsoRank, callsigns };
   await dataClient.hSet(userKey(user.username), 'dojProfile', JSON.stringify(profile));
   res.json(profile);
 }));
@@ -768,6 +1210,14 @@ app.patch('/api/teams/order', requireAuth, asyncRoute(async (req, res) => {
 
 app.get('/api/admin/teams', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   res.json(await listTeams());
+}));
+
+app.get('/api/admin/settings', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  res.json(await getSettings());
+}));
+
+app.patch('/api/admin/settings', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  res.json(await saveSettings({ allowRegistration: req.body.allowRegistration === true }));
 }));
 
 app.post('/api/admin/teams', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
@@ -892,6 +1342,13 @@ app.patch('/api/users/:username', requireAuth, requireAdmin, asyncRoute(async (r
   const username = normalizeUsername(req.params.username);
   const user = await getUser(username);
   if (!user) throw new HttpError(404, 'User not found.');
+  const requestedUsername = req.body.username ? validateUsername(req.body.username) : username;
+  if (requestedUsername !== username && (await getUser(requestedUsername) ||
+    await dataClient.exists(departmentKey(requestedUsername)) ||
+    await dataClient.exists(entryKey(requestedUsername)) ||
+    await dataClient.exists(catalogVersionKey(requestedUsername)))) {
+    throw new HttpError(409, 'Username is already in use.');
+  }
   const nextRole = req.body.role === 'admin' ? 'admin' : 'user';
   if (user.role === 'admin' && nextRole !== 'admin') {
     const adminCount = (await listUsers()).filter(candidate => candidate.role === 'admin').length;
@@ -917,7 +1374,14 @@ app.patch('/api/users/:username', requireAuth, requireAdmin, asyncRoute(async (r
   }
   await dataClient.hSet(userKey(username), updates);
   if (updates.teamIds) await syncUserDepartments(username, { newMembership: true });
-  res.json(publicUser(await getUser(username)));
+  const updatedUser = requestedUsername !== username ? await renameUser(username, requestedUsername) : await getUser(username);
+  const safeUser = publicUser(updatedUser);
+  res.json(req.user.username === username && updatedUser.username !== username
+    ? {
+        user: safeUser,
+        token: signToken({ username: updatedUser.username, exp: Date.now() + TOKEN_LIFETIME_MS })
+      }
+    : safeUser);
 }));
 
 app.delete('/api/users/:username', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
@@ -1202,6 +1666,25 @@ app.post('/api/entries/:entryId/resume', requireAuth, asyncRoute(async (req, res
   res.json(entry);
 }));
 
+app.post('/api/entries/:entryId/file-log', requireAuth, asyncRoute(async (req, res) => {
+  const user = await getUser(req.user.username);
+  if (!userHasTeam(user, DOJ_TEAM_ID)) {
+    throw new HttpError(403, 'Join Department of Justice RP to file DOJ shift logs.');
+  }
+  const entries = await getEntries(req.user.username);
+  const entry = entries.find(item => item.id === req.params.entryId);
+  if (!entry) throw new HttpError(404, 'Shift not found.');
+  if (!entry.endAt) throw new HttpError(409, 'End this patrol before filing its log.');
+  const department = findDepartment(await getDepartments(req.user.username), entry.departmentId);
+  if (!department || department.teamId !== DOJ_TEAM_ID) {
+    throw new HttpError(400, 'Only Department of Justice RP shifts can be filed through DOJ forms.');
+  }
+  const url = buildDojFormUrl(entry, department, getDojProfile(user));
+  entry.formGeneratedAt = new Date().toISOString();
+  await saveEntries(req.user.username, entries);
+  res.json({ url, entry });
+}));
+
 app.post('/api/entries/:entryId/subdivisions', requireAuth, asyncRoute(async (req, res) => {
   const entries = await getEntries(req.user.username);
   const entry = entries.find(item => item.id === req.params.entryId);
@@ -1354,6 +1837,24 @@ app.delete('/api/entries/:entryId', requireAuth, asyncRoute(async (req, res) => 
   res.json({ success: true });
 }));
 
+if (PORTABLE_MODE) {
+  app.get('/config.js', (req, res) => {
+    res.type('application/javascript').send(`window.TRACKY_CONFIG = ${JSON.stringify({
+      APP_NAME: 'TRACKY',
+      APP_DESC: 'Department Time Tracking Control Panel',
+      TAB_TITLE: 'Tracky',
+      API_BASE: ''
+    })};`);
+  });
+  app.use(express.static(STATIC_DIR));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    return res.sendFile(path.join(STATIC_DIR, 'index.html'), error => {
+      if (error) next(error);
+    });
+  });
+}
+
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
   const status = error.status || 500;
@@ -1364,7 +1865,18 @@ app.use((error, req, res, next) => {
 dataClient.connect()
   .then(ensureAdmin)
   .then(() => {
-    app.listen(PORT, () => console.log(`Tracky backend listening on port ${PORT}`));
+    app.listen(PORT, HOST, () => {
+      const address = `http://${PORTABLE_MODE ? HOST : 'localhost'}:${PORT}`;
+      console.log(`Tracky backend listening at ${address}`);
+      if (PORTABLE_MODE) {
+        console.log(`Local application data is stored in ${LOCAL_DATA_FILE}`);
+        if (process.env.TRACKY_NO_OPEN !== '1') {
+          execFile('cmd.exe', ['/c', 'start', '', address], { windowsHide: true }, error => {
+            if (error) console.error('Unable to open Tracky in the default browser:', error.message);
+          });
+        }
+      }
+    });
   })
   .catch(error => {
     console.error('Unable to start Tracky backend:', error);

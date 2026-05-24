@@ -16,7 +16,23 @@ const LOG_MONTH_ALL = 'all';
 const PERSONAL_TEAM_ID = 'personal';
 const DOJ_TEAM_ID = 'doj';
 const PATROL_RESUME_WINDOW_MS = 5 * 60 * 1000;
-const EMPTY_DOJ_PROFILE = { communityName: '', callsigns: {} };
+const BCSO_RANKS = [
+  'Probationary Reserve Deputy', 'Reserve Deputy', 'Senior Reserve Deputy', 'Probationary Deputy',
+  'Deputy I', 'Deputy II', 'Deputy III', 'Senior Deputy', 'Master Deputy', 'Corporal',
+  'Senior Corporal', 'Sergeant', 'Staff Sergeant', 'Master Sergeant', 'Lieutenant', 'Captain',
+  'Sheriff Major', 'Sheriff Commander', 'Sheriff Colonel'
+];
+const EMPTY_DOJ_PROFILE = {
+  communityName: '', email: '', websiteId: '', idn: '', investigatorRank: '', bcsoRank: '', callsigns: {}
+};
+const DOJ_FORM_DEPARTMENT_IDS = new Set([
+  'civilian-department',
+  'los-santos-police-department',
+  'san-andreas-highway-patrol',
+  'blaine-county-sheriff-s-office',
+  'communications-department',
+  'los-santos-fire-department'
+]);
 
 const dateTimeInputValue = (value, timeMode = TIME_MODE_LOCAL, includeSubMinutePrecision = false) => {
   const date = new Date(value);
@@ -99,24 +115,46 @@ const emptyManualEntry = (timeMode = TIME_MODE_LOCAL) => {
 function Login({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [teamKey, setTeamKey] = useState('');
+  const [registrationEnabled, setRegistrationEnabled] = useState(false);
+  const [registering, setRegistering] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/auth/registration`)
+      .then(response => response.ok ? response.json() : { enabled: false })
+      .then(body => setRegistrationEnabled(body.enabled === true))
+      .catch(() => setRegistrationEnabled(false));
+  }, []);
 
   const submit = async event => {
     event.preventDefault();
     setError('');
-    const response = await fetch(`${API_BASE}/api/auth/login`, {
+    if (registering && password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+    const response = await fetch(`${API_BASE}/api/auth/${registering ? 'register' : 'login'}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify(registering ? { username, password, teamKey } : { username, password })
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      setError(body.error || 'Unable to sign in.');
+      setError(body.error || (registering ? 'Unable to create account.' : 'Unable to sign in.'));
       return;
     }
     localStorage.setItem(AUTH_KEY, JSON.stringify(body));
     onLogin(body);
   };
+  const switchMode = () => {
+    setRegistering(current => !current);
+    setConfirmPassword('');
+    setTeamKey('');
+    setError('');
+  };
+  const canSubmit = username && password && (!registering || (confirmPassword && password === confirmPassword));
 
   return (
     <main className="control-panel auth-page">
@@ -131,11 +169,34 @@ function Login({ onLogin }) {
           </div>
           <div className="form-group">
             <label htmlFor="login-password">Password</label>
-            <input id="login-password" type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" required />
+            <input id="login-password" type="password" minLength={registering ? 6 : undefined} value={password} onChange={event => setPassword(event.target.value)} autoComplete={registering ? 'new-password' : 'current-password'} required />
           </div>
+          {registering && (
+            <>
+              <div className="form-group">
+                <label htmlFor="register-confirm-password">Confirm Password</label>
+                <input id="register-confirm-password" type="password" minLength="6" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} autoComplete="new-password" required />
+              </div>
+              <div className="form-group">
+                <label htmlFor="register-team-key">Team Key</label>
+                <input id="register-team-key" value={teamKey} onChange={event => setTeamKey(event.target.value)} placeholder="Optional team key" />
+                <small className="muted">Leave blank to use Personal Departments only.</small>
+              </div>
+            </>
+          )}
           {error && <p className="error-text">{error}</p>}
-          <button type="submit" className={username && password ? 'btn-primary' : 'btn-toggle'}>Sign In</button>
+          <button type="submit" className={canSubmit ? 'btn-primary' : 'btn-toggle'}>
+            {registering ? 'Create Account' : 'Sign In'}
+          </button>
         </form>
+        {registrationEnabled && (
+          <p className="auth-switch">
+            {registering ? 'Already have an account?' : 'Need an account?'}
+            <button type="button" className="btn-link" onClick={switchMode}>
+              {registering ? 'Sign In' : 'Create Account'}
+            </button>
+          </p>
+        )}
       </section>
     </main>
   );
@@ -143,10 +204,21 @@ function Login({ onLogin }) {
 
 function ProgressBar({ worked, required }) {
   const percentage = required > 0 ? Math.min(100, (worked / required) * 100) : 0;
+  const goalClass = required <= 0
+    ? 'no-goal'
+    : percentage >= 100
+      ? 'goal-complete'
+      : percentage >= 75
+        ? 'goal-high'
+        : percentage >= 50
+          ? 'goal-mid'
+          : percentage >= 25
+            ? 'goal-low'
+            : 'goal-start';
   return (
     <div className="progress">
       <div className="progress-track">
-        <span className={worked >= required && required > 0 ? 'complete' : ''} style={{ width: `${percentage}%` }} />
+        <span className={goalClass} style={{ width: `${percentage}%` }} />
       </div>
       <span>{required > 0 ? `${formatDuration(worked)} / ${formatDuration(required)} tracked` : `${formatDuration(worked)} tracked`}</span>
     </div>
@@ -214,7 +286,7 @@ function DepartmentOptions({ departments, teams }) {
   );
 }
 
-function Dashboard({ auth, onLogout }) {
+function Dashboard({ auth, onLogout, onAuthUpdate }) {
   const [departments, setDepartments] = useState([]);
   const [entries, setEntries] = useState([]);
   const [teams, setTeams] = useState([]);
@@ -241,6 +313,7 @@ function Dashboard({ auth, onLogout }) {
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user', teamIds: [DOJ_TEAM_ID] });
   const [newTeam, setNewTeam] = useState({ name: '', joinKey: '', lockDepartments: false, lockSubdivisions: false, personalized: false });
   const [joinKey, setJoinKey] = useState('');
+  const [usernameForm, setUsernameForm] = useState(auth.user.username);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '' });
   const [dojProfile, setDojProfile] = useState(EMPTY_DOJ_PROFILE);
   const [savedDojProfile, setSavedDojProfile] = useState(EMPTY_DOJ_PROFILE);
@@ -249,6 +322,7 @@ function Dashboard({ auth, onLogout }) {
   const [dragOverItem, setDragOverItem] = useState(null);
   const [expandedTeams, setExpandedTeams] = useState({});
   const [adminPanelsOpen, setAdminPanelsOpen] = useState(false);
+  const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [logMonthFilter, setLogMonthFilter] = useState(() => monthKey(new Date(), timeMode));
   const [logDepartmentFilter, setLogDepartmentFilter] = useState('');
 
@@ -297,19 +371,35 @@ function Dashboard({ auth, onLogout }) {
     setSavedDepartments(workspace.departments);
     setEntries(workspace.entries);
     setTeams(workspace.teams || []);
-    setDojProfile(workspace.dojProfile || EMPTY_DOJ_PROFILE);
-    setSavedDojProfile(workspace.dojProfile || EMPTY_DOJ_PROFILE);
+    const profile = {
+      ...EMPTY_DOJ_PROFILE,
+      ...(workspace.dojProfile || {}),
+      callsigns: workspace.dojProfile?.callsigns || {}
+    };
+    setDojProfile(profile);
+    setSavedDojProfile(profile);
     setNow(Date.now());
   };
   const loadUsers = async () => {
     if (auth.user.role !== 'admin') return;
     const result = await request('/api/users');
-    setUsers(result.map(user => ({ ...user, originalRole: user.role, originalTeamIds: user.teamIds || [], pendingPassword: '' })));
+    setUsers(result.map(user => ({
+      ...user,
+      originalUsername: user.username,
+      originalRole: user.role,
+      originalTeamIds: user.teamIds || [],
+      pendingPassword: ''
+    })));
   };
   const loadAdminTeams = async () => {
     if (auth.user.role !== 'admin') return;
     const result = await request('/api/admin/teams');
     setAdminTeams(result.map(team => ({ ...team, original: { ...team } })));
+  };
+  const loadAdminSettings = async () => {
+    if (auth.user.role !== 'admin') return;
+    const result = await request('/api/admin/settings');
+    setRegistrationEnabled(result.allowRegistration === true);
   };
 
   useEffect(() => {
@@ -330,6 +420,7 @@ function Dashboard({ auth, onLogout }) {
       await loadWorkspace();
       await loadUsers();
       await loadAdminTeams();
+      await loadAdminSettings();
     });
   }, [auth.token]);
 
@@ -365,6 +456,11 @@ function Dashboard({ auth, onLogout }) {
   const visibleDojDepartments = departments.filter(department =>
     department.teamId === DOJ_TEAM_ID && department.teamEnabled !== false && department.enabled !== false
   );
+  const hasVisibleSid = visibleDojDepartments.some(department =>
+    department.name === 'Los Santos Police Department' &&
+    department.subdivisions.some(subdivision => subdivision.name === 'Special Intelligence Division' && subdivision.enabled !== false)
+  );
+  const hasVisibleBcso = visibleDojDepartments.some(department => department.name === "Blaine County Sheriff's Office");
 
   useEffect(() => {
     if (!editableDepartmentTeams.some(team => team.id === newDepartment.teamId)) {
@@ -443,6 +539,13 @@ function Dashboard({ auth, onLogout }) {
     );
     return hidden ? [...enabled, hidden] : enabled;
   };
+  const editedSubdivisionIds = new Set((editEntryForm?.segments || patrolSegments(editingEntry))
+    .map(segment => segment.subdivisionId)
+    .filter(Boolean));
+  const missedSubdivisionOptions = editDepartment?.subdivisions.filter(subdivision =>
+    subdivision.enabled !== false &&
+    (editedSubdivisionIds.has(subdivision.id) || editedSubdivisionIds.size < 3)
+  ) || [];
   const currentMonth = monthRange(timeMode, new Date(now));
   const monthlyEntries = entries.filter(entry =>
     new Date(entry.startAt).getTime() < currentMonth.end &&
@@ -475,6 +578,11 @@ function Dashboard({ auth, onLogout }) {
   const totalRequired = progress.reduce((total, department) => total + Number(department.requiredHours || 0), 0);
   const departmentNameFor = entry => departments.find(department => department.id === entry.departmentId)?.name || entry.departmentName;
   const departmentColorFor = entry => departments.find(department => department.id === entry.departmentId)?.color || '#4a5568';
+  const canFileDojEntry = entry => {
+    const department = departments.find(item => item.id === entry.departmentId);
+    return isDojMember && Boolean(entry.endAt) && department?.teamId === DOJ_TEAM_ID &&
+      DOJ_FORM_DEPARTMENT_IDS.has(department.id);
+  };
   const subdivisionNameFor = (entry, subdivisionId, fallbackName = '') => {
     if (!subdivisionId) return 'Department only';
     return departments.find(department => department.id === entry.departmentId)?.subdivisions
@@ -598,6 +706,7 @@ function Dashboard({ auth, onLogout }) {
         method: 'POST',
         body: JSON.stringify({ subdivisionId: nextSubdivisionId })
       });
+      setNextSubdivisionId('');
       await loadWorkspace();
     }, 'Subdivision activated in this patrol.');
   };
@@ -646,6 +755,24 @@ function Dashboard({ auth, onLogout }) {
     });
     await loadWorkspace();
   }, 'Department patrol resumed.');
+  const fileLog = entry => {
+    const formWindow = window.open('', '_blank');
+    if (formWindow) formWindow.opener = null;
+    runAction(async () => {
+      try {
+        const result = await request(`/api/entries/${entry.id}/file-log`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        if (formWindow) formWindow.location.href = result.url;
+        else window.open(result.url, '_blank', 'noopener,noreferrer');
+        await loadWorkspace();
+      } catch (actionError) {
+        if (formWindow) formWindow.close();
+        throw actionError;
+      }
+    }, 'Pre-filled Google Form opened.');
+  };
   const startEditEntry = entry => {
     const form = {
       departmentId: entry.departmentId,
@@ -670,6 +797,25 @@ function Dashboard({ auth, onLogout }) {
     setEditingEntryId('');
     setEditEntryForm(null);
     setOriginalEditEntryForm(null);
+  };
+  const addMissedSubdivision = () => {
+    if (!editEntryForm || !editingEntry?.endAt || missedSubdivisionOptions.length === 0) return;
+    const existingSegments = editEntryForm.segments || patrolSegments(editingEntry).map(segment => ({
+      id: segment.id,
+      subdivisionId: segment.subdivisionId || '',
+      startAt: dateTimeInputValue(segment.startAt, timeMode, true),
+      endAt: segment.endAt ? dateTimeInputValue(segment.endAt, timeMode, true) : ''
+    }));
+    const endAt = editEntryForm.endAt || existingSegments[existingSegments.length - 1]?.endAt || '';
+    setEditEntryForm({
+      ...editEntryForm,
+      segments: [...existingSegments, {
+        id: `added-${Date.now()}`,
+        subdivisionId: missedSubdivisionOptions[0].id,
+        startAt: endAt,
+        endAt
+      }]
+    });
   };
   const saveEntry = event => {
     event.preventDefault();
@@ -868,6 +1014,18 @@ function Dashboard({ auth, onLogout }) {
       setPasswordForm({ currentPassword: '', newPassword: '' });
     }, 'Password updated.');
   };
+  const changeUsername = event => {
+    event.preventDefault();
+    runAction(async () => {
+      const nextAuth = await request('/api/auth/username', {
+        method: 'PATCH',
+        body: JSON.stringify({ username: usernameForm })
+      });
+      localStorage.setItem(AUTH_KEY, JSON.stringify(nextAuth));
+      onAuthUpdate(nextAuth);
+      setUsernameForm(nextAuth.user.username);
+    }, 'Username updated.');
+  };
   const updateDojCallsign = (id, value) => setDojProfile(current => ({
     ...current,
     callsigns: { ...current.callsigns, [id]: value }
@@ -917,20 +1075,32 @@ function Dashboard({ auth, onLogout }) {
       await Promise.all([loadUsers(), loadWorkspace()]);
     }, 'User created.');
   };
-  const saveUser = user => runAction(async () => {
-    await request(`/api/users/${user.username}`, {
+  const toggleRegistration = () => runAction(async () => {
+    const settings = await request('/api/admin/settings', {
       method: 'PATCH',
-      body: JSON.stringify({ role: user.role, password: user.pendingPassword || undefined, teamIds: user.teamIds })
+      body: JSON.stringify({ allowRegistration: !registrationEnabled })
     });
-    await Promise.all([loadUsers(), loadWorkspace()]);
+    setRegistrationEnabled(settings.allowRegistration === true);
+  }, registrationEnabled ? 'Public registration disabled.' : 'Public registration enabled.');
+  const saveUser = user => runAction(async () => {
+    const result = await request(`/api/users/${user.originalUsername}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ username: user.username, role: user.role, password: user.pendingPassword || undefined, teamIds: user.teamIds })
+    });
+    if (result.token) {
+      localStorage.setItem(AUTH_KEY, JSON.stringify(result));
+      onAuthUpdate(result);
+    } else {
+      await Promise.all([loadUsers(), loadWorkspace()]);
+    }
   }, 'User updated.');
   const toggleUserTeam = (username, teamId) => setUsers(current => current.map(user => {
-    if (user.username !== username) return user;
+    if (user.originalUsername !== username) return user;
     const includes = user.teamIds.includes(teamId);
     const teamIds = includes ? user.teamIds.filter(id => id !== teamId) : [...user.teamIds, teamId];
     return { ...user, teamIds };
   }));
-  const userHasChanges = user => user.role !== user.originalRole || user.pendingPassword ||
+  const userHasChanges = user => user.username !== user.originalUsername || user.role !== user.originalRole || user.pendingPassword ||
     JSON.stringify(user.teamIds) !== JSON.stringify(user.originalTeamIds);
   const createTeam = event => {
     event.preventDefault();
@@ -1230,6 +1400,12 @@ function Dashboard({ auth, onLogout }) {
                         </div>
                       </div>
                     )}
+                    {editingEntry?.endAt && missedSubdivisionOptions.length > 0 && (
+                      <div className="entry-edit-add">
+                        <button type="button" className="btn-toggle" onClick={addMissedSubdivision}>Add Missed Subdivision</button>
+                        <small>Adjust its start time to assign time from the previous activity.</small>
+                      </div>
+                    )}
                     <div className="form-group">
                       <label>Note</label>
                       <input value={editEntryForm.note} onChange={event => setEditEntryForm({ ...editEntryForm, note: event.target.value })} placeholder="Optional note" />
@@ -1256,6 +1432,9 @@ function Dashboard({ auth, onLogout }) {
                     <div className="entry-hours">
                       <strong>{formatDuration(durationHours(entry, now))}</strong>
                       <div className="entry-actions">
+                        {canFileDojEntry(entry) && (
+                          <button type="button" className={entry.formGeneratedAt ? 'btn-toggle' : 'btn-primary'} onClick={() => fileLog(entry)}>File Log</button>
+                        )}
                         {canResumeEntry(entry) && (
                           <button type="button" className="btn-primary" disabled={Boolean(activeEntry)} onClick={() => resumeEntry(entry)}>Resume</button>
                         )}
@@ -1447,6 +1626,13 @@ function Dashboard({ auth, onLogout }) {
         )}
 
         <CollapsiblePanel title="My Account" className="account-card">
+          <form className="compact-form" onSubmit={changeUsername}>
+            <div className="form-group">
+              <label>Username</label>
+              <input value={usernameForm} onChange={event => setUsernameForm(event.target.value)} required />
+            </div>
+            <button className={usernameForm !== auth.user.username ? 'btn-primary' : 'btn-toggle'}>Update Username</button>
+          </form>
           <form className="compact-form" onSubmit={changePassword}>
             <div className="form-group">
               <label>Current Password</label>
@@ -1506,6 +1692,37 @@ function Dashboard({ auth, onLogout }) {
                     title="Use First Name and Last Initial followed by a period, for example Cleo M."
                   />
                 </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Email Address</label>
+                    <input type="email" value={dojProfile.email} onChange={event => setDojProfile({ ...dojProfile, email: event.target.value })} placeholder="Optional email address" />
+                  </div>
+                  <div className="form-group">
+                    <label>Website ID</label>
+                    <input value={dojProfile.websiteId} onChange={event => setDojProfile({ ...dojProfile, websiteId: event.target.value })} placeholder="Optional website ID" />
+                  </div>
+                </div>
+                {hasVisibleSid && (
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>IDN</label>
+                      <input value={dojProfile.idn} onChange={event => setDojProfile({ ...dojProfile, idn: event.target.value })} placeholder="Optional IDN" />
+                    </div>
+                    <div className="form-group">
+                      <label>Investigator Rank</label>
+                      <input value={dojProfile.investigatorRank} onChange={event => setDojProfile({ ...dojProfile, investigatorRank: event.target.value })} placeholder="Optional investigator rank" />
+                    </div>
+                  </div>
+                )}
+                {hasVisibleBcso && (
+                  <div className="form-group">
+                    <label>BCSO Rank</label>
+                    <select value={dojProfile.bcsoRank} onChange={event => setDojProfile({ ...dojProfile, bcsoRank: event.target.value })}>
+                      <option value="">No rank selected</option>
+                      {BCSO_RANKS.map(rank => <option key={rank} value={rank}>{rank}</option>)}
+                    </select>
+                  </div>
+                )}
                 <div className="doj-callsign-list">
                   {visibleDojDepartments.length === 0 && (
                     <p className="empty-text">Enable a DOJ department to configure its callsigns.</p>
@@ -1535,6 +1752,19 @@ function Dashboard({ auth, onLogout }) {
         {auth.user.role === 'admin' && (
           <div className="admin-management-grid">
           <CollapsiblePanel title="User Management" className="admin-card user-admin-card" open={adminPanelsOpen} onOpenChange={setAdminPanelsOpen}>
+            <section className="compact-form registration-settings">
+              <div>
+                <h3>Public Registration</h3>
+                <p className="muted">Allow users to create an account from the sign-in page and optionally enter a team key.</p>
+              </div>
+              <button
+                type="button"
+                className={registrationEnabled ? 'btn-toggle' : 'btn-primary'}
+                onClick={toggleRegistration}
+              >
+                {registrationEnabled ? 'Disable Registration' : 'Enable Registration'}
+              </button>
+            </section>
             <form className="compact-form" onSubmit={createUser}>
               <h3>Create User</h3>
               <div className="form-row">
@@ -1575,27 +1805,29 @@ function Dashboard({ auth, onLogout }) {
             </form>
             <div className="user-list">
               {users.map(user => (
-                <div className="user-row" key={user.username}>
-                  <strong>{user.username}</strong>
+                <div className="user-row" key={user.originalUsername}>
+                  <input value={user.username} aria-label={`${user.originalUsername} username`} onChange={event => setUsers(current => current.map(item =>
+                    item.originalUsername === user.originalUsername ? { ...item, username: event.target.value } : item
+                  ))} />
                   <select value={user.role} onChange={event => setUsers(current => current.map(item =>
-                    item.username === user.username ? { ...item, role: event.target.value } : item
+                    item.originalUsername === user.originalUsername ? { ...item, role: event.target.value } : item
                   ))}>
                     <option value="user">User</option>
                     <option value="admin">Administrator</option>
                   </select>
                   <input type="password" placeholder="New password (optional)" value={user.pendingPassword} onChange={event => setUsers(current => current.map(item =>
-                    item.username === user.username ? { ...item, pendingPassword: event.target.value } : item
+                    item.originalUsername === user.originalUsername ? { ...item, pendingPassword: event.target.value } : item
                   ))} />
                   <div className="team-checkbox-list user-teams">
                     {adminTeams.map(team => (
                       <label key={team.id}>
-                        <input type="checkbox" checked={user.teamIds.includes(team.id)} onChange={() => toggleUserTeam(user.username, team.id)} />
+                        <input type="checkbox" checked={user.teamIds.includes(team.id)} onChange={() => toggleUserTeam(user.originalUsername, team.id)} />
                         {team.name}
                       </label>
                     ))}
                   </div>
                   <button className={userHasChanges(user) ? 'btn-primary' : 'btn-toggle'} onClick={() => saveUser(user)}>Save</button>
-                  <button className="btn-delete" disabled={user.username === auth.user.username} onClick={() => deleteUser(user)}>Delete</button>
+                  <button className="btn-delete" disabled={user.originalUsername === auth.user.username} onClick={() => deleteUser({ ...user, username: user.originalUsername })}>Delete</button>
                 </div>
               ))}
             </div>
@@ -1671,7 +1903,7 @@ function App() {
     setAuth(null);
   };
 
-  return auth ? <Dashboard auth={auth} onLogout={logout} /> : <Login onLogin={setAuth} />;
+  return auth ? <Dashboard auth={auth} onLogout={logout} onAuthUpdate={setAuth} /> : <Login onLogin={setAuth} />;
 }
 
 export default App;

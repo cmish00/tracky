@@ -26,6 +26,15 @@ body {
   width: min(440px, 100%);
 }
 
+.auth-switch {
+  align-items: center;
+  color: #a0aec0;
+  display: flex;
+  gap: 0.45rem;
+  justify-content: center;
+  margin: 0.25rem 0 0;
+}
+
 .desk-header {
   border-bottom: 1px solid #2d3748;
   display: grid;
@@ -294,6 +303,16 @@ button:disabled {
   background: #4a5568;
 }
 
+.btn-link {
+  background: transparent;
+  color: #63b3ed;
+  padding: 0.3rem 0.15rem;
+}
+
+.btn-link:hover:not(:disabled) {
+  color: #90cdf4;
+}
+
 .btn-delete {
   background: transparent;
   color: #fc8181;
@@ -434,12 +453,28 @@ button:disabled {
 }
 
 .progress-track span {
-  background: #3182ce;
   display: block;
   height: 100%;
 }
 
-.progress-track span.complete {
+.progress-track span.no-goal,
+.progress-track span.goal-high {
+  background: #3182ce;
+}
+
+.progress-track span.goal-start {
+  background: #e53e3e;
+}
+
+.progress-track span.goal-low {
+  background: #dd6b20;
+}
+
+.progress-track span.goal-mid {
+  background: #ecc94b;
+}
+
+.progress-track span.goal-complete {
   background: #38a169;
 }
 
@@ -533,6 +568,16 @@ button:disabled {
 
 .entry-segments small {
   color: #cbd5e0;
+}
+
+.entry-edit-add {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.entry-edit-add small {
+  color: #a0aec0;
 }
 
 .entry-row span,
@@ -822,6 +867,14 @@ button:disabled {
 
 .admin-management-grid .full-width-card {
   grid-column: auto;
+}
+
+.registration-settings {
+  align-items: flex-start;
+}
+
+.registration-settings p {
+  margin: 0.4rem 0 0;
 }
 
 .team-admin-card {
