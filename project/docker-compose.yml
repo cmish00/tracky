@@ -1,0 +1,41 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - tracky_redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3000
+      - AUTH_SECRET=${AUTH_SECRET:-tracky_please_change_this_secret}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      # ACCESS_URL is optional. Leave blank to allow browser access from any origin.
+      # To restrict access, enter a comma-separated list of allowed origins.
+      # Example: ACCESS_URL=https://tracky.example.com,https://staff.example.com
+      - ACCESS_URL=${ACCESS_URL:-}
+    ports:
+      - "${TRACKY_API_PORT:-3100}:3000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    environment:
+      - APP_NAME=TRACKY
+      - APP_DESC=Department Time Tracking Control Panel
+      - TAB_TITLE=Tracky
+      - API_BASE=
+    ports:
+      - "${TRACKY_PORT:-8080}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  tracky_redis_data:
