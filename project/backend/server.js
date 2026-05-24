@@ -1300,34 +1300,57 @@ app.get('/api/users', requireAuth, requireAdmin, asyncRoute(async (req, res) => 
 }));
 
 app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  const viewer = await getUser(req.user.username);
+  const canViewDojIdentity = userHasTeam(viewer, DOJ_TEAM_ID);
+  const historyCutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
   const patrols = await Promise.all((await listUsers()).map(async user => {
     const [departments, entries] = await Promise.all([
       getDepartments(user.username),
       getEntries(user.username)
     ]);
-    const entry = entries.find(item => !item.endAt);
-    if (!entry) return null;
-    const segments = entrySegments(entry);
-    const activeSegment = [...segments].reverse().find(segment => !segment.endAt) || segments[segments.length - 1];
-    const department = findDepartment(departments, entry.departmentId);
-    const subdivision = activeSegment?.subdivisionId
-      ? findSubdivision(department, activeSegment.subdivisionId)
-      : null;
+    const profile = canViewDojIdentity && userHasTeam(user, DOJ_TEAM_ID) ? getDojProfile(user) : null;
+    const summarize = entry => {
+      const segments = entrySegments(entry);
+      const assignment = [...segments].reverse().find(segment => !segment.endAt) || segments[segments.length - 1];
+      const department = findDepartment(departments, entry.departmentId);
+      const subdivision = assignment?.subdivisionId
+        ? findSubdivision(department, assignment.subdivisionId)
+        : null;
+      const unitNumber = profile
+        ? profile.callsigns[subdivision?.id || ''] || profile.callsigns[department?.id || ''] || ''
+        : '';
+      return {
+        entryId: entry.id,
+        username: user.username,
+        role: publicUser(user).role,
+        departmentName: department?.name || entry.departmentName,
+        departmentColor: department?.color || '#4a5568',
+        subdivisionName: assignment?.subdivisionId
+          ? subdivision?.name || assignment.subdivisionName
+          : '',
+        startAt: entry.startAt,
+        endAt: entry.endAt || null,
+        assignmentStartAt: assignment?.startAt || entry.startAt,
+        dojIdentity: profile ? [profile.communityName, unitNumber].filter(Boolean).join(' / ') : ''
+      };
+    };
     return {
-      entryId: entry.id,
-      username: user.username,
-      role: publicUser(user).role,
-      departmentName: department?.name || entry.departmentName,
-      subdivisionName: activeSegment?.subdivisionId
-        ? subdivision?.name || activeSegment.subdivisionName
-        : '',
-      startAt: entry.startAt,
-      assignmentStartAt: activeSegment?.startAt || entry.startAt
+      active: entries.find(item => !item.endAt) ? summarize(entries.find(item => !item.endAt)) : null,
+      historic: entries
+        .filter(entry => entry.endAt && new Date(entry.endAt).getTime() >= historyCutoff)
+        .map(summarize)
     };
   }));
-  res.json(patrols
-    .filter(Boolean)
-    .sort((left, right) => new Date(left.startAt) - new Date(right.startAt)));
+  res.json({
+    canViewDojIdentity,
+    activePatrols: patrols
+      .map(item => item.active)
+      .filter(Boolean)
+      .sort((left, right) => new Date(left.startAt) - new Date(right.startAt)),
+    historicPatrols: patrols
+      .flatMap(item => item.historic)
+      .sort((left, right) => new Date(right.endAt) - new Date(left.endAt))
+  });
 }));
 
 app.post('/api/users', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
@@ -1758,17 +1781,22 @@ app.patch('/api/entries/:entryId', requireAuth, asyncRoute(async (req, res) => {
         department
       });
     }
+    const collapsedSegments = normalizedSegments.reduce((segments, segment) => {
+      if (segments[segments.length - 1]?.subdivisionId === segment.subdivisionId) return segments;
+      segments.push(segment);
+      return segments;
+    }, []);
     const endInput = req.body.endAt === undefined ? entry.endAt : req.body.endAt;
     const endAt = endInput ? parseDate(endInput, 'Clock-out time') : null;
-    const finalSegment = normalizedSegments[normalizedSegments.length - 1];
+    const finalSegment = collapsedSegments[collapsedSegments.length - 1];
     if (endAt && new Date(endAt) < new Date(finalSegment.startAt)) {
       throw new HttpError(400, 'Clock-out time cannot be before the final assignment started.');
     }
     if (!endAt && entries.some(item => item.id !== entry.id && !item.endAt)) {
       throw new HttpError(409, 'Only one active department patrol can be open at a time.');
     }
-    normalizedSegments.forEach((segment, index) => {
-      segment.endAt = normalizedSegments[index + 1]?.startAt || endAt;
+    collapsedSegments.forEach((segment, index) => {
+      segment.endAt = collapsedSegments[index + 1]?.startAt || endAt;
       delete segment.department;
     });
     const department = (await resolveAssignment(req.user.username, departmentId, '', { allowDisabled: sameDepartment })).department;
@@ -1778,9 +1806,9 @@ app.patch('/api/entries/:entryId', requireAuth, asyncRoute(async (req, res) => {
       subdivisionId: finalSegment.subdivisionId,
       subdivisionName: finalSegment.subdivisionName,
       note: cleanText(req.body.note === undefined ? entry.note : req.body.note, 200),
-      startAt: normalizedSegments[0].startAt,
+      startAt: collapsedSegments[0].startAt,
       endAt,
-      segments: normalizedSegments
+      segments: collapsedSegments
     });
     await saveEntries(req.user.username, entries);
     return res.json(entry);

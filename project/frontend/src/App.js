@@ -68,6 +68,15 @@ const patrolSegments = entry => entry?.segments?.length ? entry.segments : entry
   startAt: entry.startAt,
   endAt: entry.endAt
 }] : [];
+const mergeAdjacentSegments = segments => segments.reduce((merged, segment) => {
+  const previous = merged[merged.length - 1];
+  if (previous && previous.subdivisionId === segment.subdivisionId) {
+    previous.endAt = segment.endAt;
+    return merged;
+  }
+  merged.push({ ...segment });
+  return merged;
+}, []);
 const assignmentName = segment => segment?.subdivisionName || 'Department only';
 const monthKey = (value, timeMode = TIME_MODE_LOCAL) => {
   const date = new Date(value);
@@ -293,6 +302,9 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   const [adminTeams, setAdminTeams] = useState([]);
   const [users, setUsers] = useState([]);
   const [activePatrols, setActivePatrols] = useState([]);
+  const [historicPatrols, setHistoricPatrols] = useState([]);
+  const [canViewDojPatrolIdentity, setCanViewDojPatrolIdentity] = useState(false);
+  const [showDojPatrolIdentity, setShowDojPatrolIdentity] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [now, setNow] = useState(Date.now());
@@ -359,8 +371,11 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   const loadActivePatrols = async () => {
     if (auth.user.role !== 'admin') return [];
     const result = await request('/api/admin/active-patrols');
-    setActivePatrols(result);
-    return result;
+    setActivePatrols(result.activePatrols || []);
+    setHistoricPatrols(result.historicPatrols || []);
+    setCanViewDojPatrolIdentity(result.canViewDojIdentity === true);
+    if (result.canViewDojIdentity !== true) setShowDojPatrolIdentity(false);
+    return result.activePatrols || [];
   };
   const loadWorkspace = async () => {
     const [workspace] = await Promise.all([
@@ -453,6 +468,9 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     departments: departments.filter(department => department.teamId === team.id)
   }));
   const isDojMember = teams.some(team => team.id === DOJ_TEAM_ID);
+  const adminPatrolName = patrol => showDojPatrolIdentity && patrol.dojIdentity
+    ? patrol.dojIdentity
+    : patrol.username;
   const visibleDojDepartments = departments.filter(department =>
     department.teamId === DOJ_TEAM_ID && department.teamEnabled !== false && department.enabled !== false
   );
@@ -798,24 +816,53 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     setEditEntryForm(null);
     setOriginalEditEntryForm(null);
   };
+  const applyEditedSegments = segments => {
+    const merged = mergeAdjacentSegments(segments);
+    setEditEntryForm(current => merged.length === 1 ? {
+      ...current,
+      subdivisionId: merged[0].subdivisionId,
+      startAt: merged[0].startAt,
+      endAt: merged[0].endAt,
+      segments: undefined
+    } : {
+      ...current,
+      startAt: merged[0].startAt,
+      endAt: merged[merged.length - 1].endAt,
+      segments: merged
+    });
+  };
+  const removeEditedSegment = segmentId => {
+    if (!editEntryForm?.segments || editEntryForm.segments.length <= 1) return;
+    applyEditedSegments(editEntryForm.segments.filter(segment => segment.id !== segmentId));
+  };
   const addMissedSubdivision = () => {
     if (!editEntryForm || !editingEntry?.endAt || missedSubdivisionOptions.length === 0) return;
-    const existingSegments = editEntryForm.segments || patrolSegments(editingEntry).map(segment => ({
-      id: segment.id,
-      subdivisionId: segment.subdivisionId || '',
-      startAt: dateTimeInputValue(segment.startAt, timeMode, true),
-      endAt: segment.endAt ? dateTimeInputValue(segment.endAt, timeMode, true) : ''
-    }));
-    const endAt = editEntryForm.endAt || existingSegments[existingSegments.length - 1]?.endAt || '';
-    setEditEntryForm({
-      ...editEntryForm,
-      segments: [...existingSegments, {
-        id: `added-${Date.now()}`,
-        subdivisionId: missedSubdivisionOptions[0].id,
-        startAt: endAt,
-        endAt
-      }]
-    });
+    const existingSegments = editEntryForm.segments || [{
+      id: patrolSegments(editingEntry)[0].id,
+      subdivisionId: editEntryForm.subdivisionId || '',
+      startAt: dateTimeInputValue(parseDateTimeInput(editEntryForm.startAt, timeMode), timeMode, true),
+      endAt: editEntryForm.endAt
+        ? dateTimeInputValue(parseDateTimeInput(editEntryForm.endAt, timeMode), timeMode, true)
+        : ''
+    }];
+    const adjacentSubdivisionId = editEntryForm.segments
+      ? existingSegments[existingSegments.length - 1].subdivisionId
+      : existingSegments[0].subdivisionId;
+    const missedSubdivision = missedSubdivisionOptions.find(subdivision => subdivision.id !== adjacentSubdivisionId) ||
+      missedSubdivisionOptions[0];
+    const addedSegment = {
+      id: `added-${Date.now()}`,
+      subdivisionId: missedSubdivision.id,
+      startAt: editEntryForm.segments
+        ? existingSegments[existingSegments.length - 1].endAt
+        : existingSegments[0].startAt,
+      endAt: editEntryForm.segments
+        ? existingSegments[existingSegments.length - 1].endAt
+        : existingSegments[0].startAt
+    };
+    applyEditedSegments(editEntryForm.segments
+      ? [...existingSegments, addedSegment]
+      : [addedSegment, ...existingSegments]);
   };
   const saveEntry = event => {
     event.preventDefault();
@@ -1349,12 +1396,11 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
                           <div className="form-row segment-edit-row" key={segment.id}>
                             <div className="form-group">
                               <label>Assignment {index + 1}</label>
-                              <select value={segment.subdivisionId} onChange={event => setEditEntryForm({
-                                ...editEntryForm,
-                                segments: editEntryForm.segments.map(item => item.id === segment.id
+                              <select value={segment.subdivisionId} onChange={event => applyEditedSegments(
+                                editEntryForm.segments.map(item => item.id === segment.id
                                   ? { ...item, subdivisionId: event.target.value }
                                   : item)
-                              })}>
+                              )}>
                                 <option value="">{NO_SUBDIVISION_LABEL}</option>
                                 <SubdivisionOptions subdivisions={editSegmentSubdivisionOptions(segment.subdivisionId)} />
                               </select>
@@ -1385,6 +1431,7 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
                                 });
                               }} step="0.001" required={index < editEntryForm.segments.length - 1 || Boolean(editEntryForm.endAt)} />
                             </div>
+                            <button type="button" className="btn-delete segment-remove" onClick={() => removeEditedSegment(segment.id)}>Remove</button>
                           </div>
                         ))}
                       </div>
@@ -1403,7 +1450,7 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
                     {editingEntry?.endAt && missedSubdivisionOptions.length > 0 && (
                       <div className="entry-edit-add">
                         <button type="button" className="btn-toggle" onClick={addMissedSubdivision}>Add Missed Subdivision</button>
-                        <small>Adjust its start time to assign time from the previous activity.</small>
+                        <small>Adjust the boundary time to assign the missed activity.</small>
                       </div>
                     )}
                     <div className="form-group">
@@ -1605,13 +1652,25 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
 
         {auth.user.role === 'admin' && (
           <CollapsiblePanel title="Active Patrols">
-            <p className="muted">Current department patrols across all users. This list refreshes automatically.</p>
+            <div className="patrol-admin-heading">
+              <p className="muted">Current department patrols across all users. This list refreshes automatically.</p>
+              {canViewDojPatrolIdentity && isDojMember && (
+                <div className="time-mode-toggle">
+                  <button type="button" className={!showDojPatrolIdentity ? 'btn-primary' : 'btn-toggle'} onClick={() => setShowDojPatrolIdentity(false)}>USERNAME</button>
+                  <button type="button" className={showDojPatrolIdentity ? 'btn-primary' : 'btn-toggle'} onClick={() => setShowDojPatrolIdentity(true)}>COMMUNITY / UNIT</button>
+                </div>
+              )}
+            </div>
             <div className="entry-list">
               {activePatrols.length === 0 && <p className="empty-text">No users currently have an active patrol.</p>}
               {activePatrols.map(patrol => (
-                <div className="entry-row open" key={patrol.entryId}>
+                <div
+                  className="entry-row open"
+                  key={patrol.entryId}
+                  style={{ borderLeftColor: patrol.departmentColor || '#4a5568' }}
+                >
                   <div className="entry-summary">
-                    <strong>{patrol.username}</strong>
+                    <strong>{adminPatrolName(patrol)}</strong>
                     <small>{patrol.departmentName} / {patrol.subdivisionName || 'Department only'}</small>
                     <small>Started {formatDateTime(patrol.startAt, timeMode, clockFormat)}</small>
                   </div>
@@ -1622,6 +1681,32 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
                 </div>
               ))}
             </div>
+            <details className="historic-patrols">
+              <summary>
+                <h3>Historic Patrols - Last 30 Days</h3>
+                <small>{historicPatrols.length} patrol{historicPatrols.length === 1 ? '' : 's'}</small>
+              </summary>
+              <div className="entry-list">
+                {historicPatrols.length === 0 && <p className="empty-text">No completed patrols recorded in the last 30 days.</p>}
+                {historicPatrols.map(patrol => (
+                  <div
+                    className="entry-row"
+                    key={patrol.entryId}
+                    style={{ borderLeftColor: patrol.departmentColor || '#4a5568' }}
+                  >
+                    <div className="entry-summary">
+                      <strong>{adminPatrolName(patrol)}</strong>
+                      <small>{patrol.departmentName} / {patrol.subdivisionName || 'Department only'}</small>
+                      <small>{formatDateTime(patrol.startAt, timeMode, clockFormat)} - {formatDateTime(patrol.endAt, timeMode, clockFormat)}</small>
+                    </div>
+                    <div className="entry-hours">
+                      <strong>{formatDuration(durationHours(patrol, now))}</strong>
+                      <small>Total patrol duration</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
           </CollapsiblePanel>
         )}
 

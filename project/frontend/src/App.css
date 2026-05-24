@@ -617,12 +617,72 @@ button:disabled {
 }
 
 .segment-edit-row {
+  align-items: end;
   border-bottom: 1px dashed #4a5568;
   padding-bottom: 0.75rem;
 }
 
+.segment-remove {
+  align-self: end;
+  margin-bottom: 0.15rem;
+}
+
 .entry-edit-actions {
   justify-content: flex-end;
+}
+
+.patrol-admin-heading {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.patrol-admin-heading p {
+  margin: 0;
+}
+
+.historic-patrols {
+  background: #10141d;
+  border-radius: 8px;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.historic-patrols > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 0.8rem;
+  justify-content: space-between;
+  list-style: none;
+}
+
+.historic-patrols > summary::-webkit-details-marker {
+  display: none;
+}
+
+.historic-patrols > summary h3::before {
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid #90cdf4;
+  border-top: 5px solid transparent;
+  content: "";
+  display: inline-block;
+  margin-right: 0.55rem;
+  transition: transform 0.15s ease;
+}
+
+.historic-patrols[open] > summary h3::before {
+  transform: rotate(90deg);
+}
+
+.historic-patrols > summary small {
+  color: #718096;
+}
+
+.historic-patrols > .entry-list {
+  margin-top: 1rem;
 }
 
 .empty-text {
@@ -1019,6 +1079,11 @@ button:disabled {
 
   .session-actions {
     justify-content: space-between;
+  }
+
+  .patrol-admin-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .panel-summary {
