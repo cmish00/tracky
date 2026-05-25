@@ -59,6 +59,24 @@ body {
   text-transform: uppercase;
 }
 
+.console-meta {
+  align-items: baseline;
+  display: flex;
+  gap: 0;
+}
+
+.console-meta .eyebrow {
+  margin-right: 0;
+}
+
+.header-clock {
+  border-left: 1px solid #a0aec0;
+  color: #a0aec0;
+  font-size: 0.75rem;
+  margin: 0 0 0.35rem 0.85rem;
+  padding-left: 0.85rem;
+}
+
 .highlight {
   color: #63b3ed;
 }

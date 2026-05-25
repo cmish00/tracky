@@ -1301,6 +1301,7 @@ app.get('/api/users', requireAuth, requireAdmin, asyncRoute(async (req, res) => 
 
 app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   const viewer = await getUser(req.user.username);
+  const viewerDepartments = await getDepartments(viewer.username);
   const canViewDojIdentity = userHasTeam(viewer, DOJ_TEAM_ID);
   const historyCutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
   const patrols = await Promise.all((await listUsers()).map(async user => {
@@ -1313,6 +1314,7 @@ app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async
       const segments = entrySegments(entry);
       const assignment = [...segments].reverse().find(segment => !segment.endAt) || segments[segments.length - 1];
       const department = findDepartment(departments, entry.departmentId);
+      const viewerDepartment = findDepartment(viewerDepartments, entry.departmentId);
       const subdivision = assignment?.subdivisionId
         ? findSubdivision(department, assignment.subdivisionId)
         : null;
@@ -1324,7 +1326,7 @@ app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async
         username: user.username,
         role: publicUser(user).role,
         departmentName: department?.name || entry.departmentName,
-        departmentColor: department?.color || '#4a5568',
+        departmentColor: viewerDepartment?.color || '#4a5568',
         subdivisionName: assignment?.subdivisionId
           ? subdivision?.name || assignment.subdivisionName
           : '',

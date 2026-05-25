@@ -52,6 +52,12 @@ const formatDateTime = (value, timeMode = TIME_MODE_LOCAL, clockFormat = CLOCK_F
   hourCycle: clockFormat === CLOCK_FORMAT_24 ? 'h23' : 'h12',
   ...(timeMode === TIME_MODE_ZULU ? { timeZone: 'UTC' } : {})
 })}${timeMode === TIME_MODE_ZULU ? ' Z' : ''}`;
+const formatHeaderTime = (value, timeMode = TIME_MODE_LOCAL, clockFormat = CLOCK_FORMAT_12) => `${new Date(value).toLocaleTimeString([], {
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: clockFormat === CLOCK_FORMAT_24 ? 'h23' : 'h12',
+  ...(timeMode === TIME_MODE_ZULU ? { timeZone: 'UTC' } : {})
+})}${timeMode === TIME_MODE_ZULU ? ' ZULU' : ''}`.toUpperCase();
 const formatDuration = hours => {
   const minutes = Math.max(0, Math.round(hours * 60));
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
@@ -304,7 +310,9 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   const [activePatrols, setActivePatrols] = useState([]);
   const [historicPatrols, setHistoricPatrols] = useState([]);
   const [canViewDojPatrolIdentity, setCanViewDojPatrolIdentity] = useState(false);
-  const [showDojPatrolIdentity, setShowDojPatrolIdentity] = useState(false);
+  const [showDojPatrolIdentity, setShowDojPatrolIdentity] = useState(() =>
+    localStorage.getItem(`tracky_patrol_identity:${auth.user.username}`) === 'community-unit'
+  );
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [now, setNow] = useState(Date.now());
@@ -374,7 +382,6 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     setActivePatrols(result.activePatrols || []);
     setHistoricPatrols(result.historicPatrols || []);
     setCanViewDojPatrolIdentity(result.canViewDojIdentity === true);
-    if (result.canViewDojIdentity !== true) setShowDojPatrolIdentity(false);
     return result.activePatrols || [];
   };
   const loadWorkspace = async () => {
@@ -487,10 +494,9 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   }, [teams.map(team => team.id).join('|'), auth.user.role]);
 
   useEffect(() => {
-    if (!activeEntry && activePatrols.length === 0 && !hasResumableEntry) return undefined;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [activeEntry, activePatrols.length, hasResumableEntry]);
+  }, []);
 
   useEffect(() => {
     if (activeDepartments.length === 0) {
@@ -704,6 +710,10 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   const setDisplayClockFormat = nextFormat => {
     localStorage.setItem(`tracky_clock_format:${auth.user.username}`, nextFormat);
     setClockFormat(nextFormat);
+  };
+  const setPatrolIdentityDisplay = showIdentity => {
+    localStorage.setItem(`tracky_patrol_identity:${auth.user.username}`, showIdentity ? 'community-unit' : 'username');
+    setShowDojPatrolIdentity(showIdentity);
   };
 
   const createClockEntry = event => {
@@ -1189,7 +1199,10 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     <main className="control-panel">
       <header className="desk-header">
         <div>
-          <p className="eyebrow">Operations Console</p>
+          <div className="console-meta">
+            <p className="eyebrow">Operations Console</p>
+            <span className="header-clock">{formatHeaderTime(now, timeMode, clockFormat)}</span>
+          </div>
           <h1>{APP_NAME} <span className="highlight">Time Control</span></h1>
           <p className="muted">{APP_DESC}</p>
         </div>
@@ -1655,9 +1668,9 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
             <div className="patrol-admin-heading">
               <p className="muted">Current department patrols across all users. This list refreshes automatically.</p>
               {canViewDojPatrolIdentity && isDojMember && (
-                <div className="time-mode-toggle">
-                  <button type="button" className={!showDojPatrolIdentity ? 'btn-primary' : 'btn-toggle'} onClick={() => setShowDojPatrolIdentity(false)}>USERNAME</button>
-                  <button type="button" className={showDojPatrolIdentity ? 'btn-primary' : 'btn-toggle'} onClick={() => setShowDojPatrolIdentity(true)}>COMMUNITY / UNIT</button>
+                <div className="time-mode-toggle" aria-label="Active patrol identity display">
+                  <button type="button" className={!showDojPatrolIdentity ? 'btn-primary' : 'btn-toggle'} onClick={() => setPatrolIdentityDisplay(false)}>USERNAME</button>
+                  <button type="button" className={showDojPatrolIdentity ? 'btn-primary' : 'btn-toggle'} onClick={() => setPatrolIdentityDisplay(true)}>COMMUNITY / UNIT</button>
                 </div>
               )}
             </div>
