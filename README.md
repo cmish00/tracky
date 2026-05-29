@@ -7,13 +7,12 @@ Grab the [Latest Release](https://github.com/cmish00/tracky/releases/latest)
 **Built-In integration with some gaming communities.**
 - Users can enter a "team code" to gain access to pre-configured departments with additional options like pre-filled form generation!
 
-**Closed Demo for Deartment of Justice Roleplay Community Members: [tracky.sagov.dev](https://tracky.sagov.dev); reach out for the `key`.**
+**Closed Demo for Department of Justice Roleplay Community Members: [tracky.sagov.dev](https://tracky.sagov.dev); reach out for the `key`.**
 
 # Previews
 ![Cover Image](/assets/images/cover.png)
 ![Cover Image](/assets/images/cover2.png)
 ![Cover Image](/assets/images/cover3.png)
-![Cover Image](/assets/images/cover4.png)
 ![Cover Image](/assets/images/cover5.png)
 
 # Installation
