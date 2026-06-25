@@ -20,7 +20,7 @@ Grab the [Latest Release](https://github.com/cmish00/tracky/releases/latest)
 - Download the required files.
 - Navigate to the `project` folder within the Docker or System CLI.
 - Set environment variables inside `docker-compose.yml` | Default working values have already been set. This step is optional.
-- Run `docker compose up --build
+- Run `docker compose up --build`
 
 # Docker Compose
 **Install through a Docker Compose manager like Portainer.** | [Docker Hub](https://hub.docker.com/repository/docker/cmish00/tracky-frontend/)
