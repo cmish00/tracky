@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import MigrationPanel from './MigrationPanel';
 
 const runtimeConfig = window.TRACKY_CONFIG || {};
 const APP_NAME = runtimeConfig.APP_NAME || 'TRACKY';
@@ -16,6 +17,7 @@ const LOG_MONTH_ALL = 'all';
 const PERSONAL_TEAM_ID = 'personal';
 const DOJ_TEAM_ID = 'doj';
 const PATROL_RESUME_WINDOW_MS = 5 * 60 * 1000;
+const HISTORIC_PATROL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const BCSO_RANKS = [
   'Probationary Reserve Deputy', 'Reserve Deputy', 'Senior Reserve Deputy', 'Probationary Deputy',
   'Deputy I', 'Deputy II', 'Deputy III', 'Senior Deputy', 'Master Deputy', 'Corporal',
@@ -114,6 +116,41 @@ const monthRange = (timeMode, now = new Date()) => {
     end: end.getTime(),
     label: `${now.toLocaleString([], { month: 'long', year: 'numeric' })} / LOCAL`
   };
+};
+const historicPatrolRange = (now = new Date()) => ({
+  start: now.getTime() - HISTORIC_PATROL_WINDOW_MS,
+  end: now.getTime() + 1
+});
+const calendarWeekStart = (value, timeMode = TIME_MODE_LOCAL) => {
+  const date = new Date(value);
+  if (timeMode === TIME_MODE_ZULU) {
+    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - date.getUTCDay());
+  }
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - date.getDay()).getTime();
+};
+const weekRangesForHistory = (timeMode, now = new Date()) => {
+  const range = historicPatrolRange(now);
+  const weeks = [];
+  let start = calendarWeekStart(range.start, timeMode);
+  while (start < range.end) {
+    const date = new Date(start);
+    const end = timeMode === TIME_MODE_ZULU
+      ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 7)
+      : new Date(date.getFullYear(), date.getMonth(), date.getDate() + 7).getTime();
+    const labelOptions = {
+      month: 'short',
+      day: 'numeric',
+      ...(timeMode === TIME_MODE_ZULU ? { timeZone: 'UTC' } : {})
+    };
+    weeks.push({
+      value: String(start),
+      start,
+      end,
+      label: `${new Date(start).toLocaleString([], labelOptions)} - ${new Date(end - 1).toLocaleString([], labelOptions)}`
+    });
+    start = end;
+  }
+  return weeks.reverse();
 };
 const emptyManualEntry = (timeMode = TIME_MODE_LOCAL) => {
   const end = new Date();
@@ -345,6 +382,8 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [logMonthFilter, setLogMonthFilter] = useState(() => monthKey(new Date(), timeMode));
   const [logDepartmentFilter, setLogDepartmentFilter] = useState('');
+  const [historicWeekFilter, setHistoricWeekFilter] = useState('');
+  const [historicDepartmentFilter, setHistoricDepartmentFilter] = useState('');
 
   const request = async (path, options = {}) => {
     const response = await fetch(`${API_BASE}${path}`, {
@@ -378,7 +417,8 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
 
   const loadActivePatrols = async () => {
     if (auth.user.role !== 'admin') return [];
-    const result = await request('/api/admin/active-patrols');
+    const historicRange = historicPatrolRange();
+    const result = await request(`/api/admin/active-patrols?historyStart=${historicRange.start}&historyEnd=${historicRange.end}`);
     setActivePatrols(result.activePatrols || []);
     setHistoricPatrols(result.historicPatrols || []);
     setCanViewDojPatrolIdentity(result.canViewDojIdentity === true);
@@ -453,6 +493,10 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     }, 15000);
     return () => clearInterval(timer);
   }, [auth.token, auth.user.role]);
+
+  useEffect(() => {
+    if (auth.user.role === 'admin') loadActivePatrols().catch(() => {});
+  }, [timeMode]);
 
   const activeEntry = entries.find(entry => !entry.endAt);
   const hasResumableEntry = entries.some(entry => {
@@ -571,6 +615,22 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     (editedSubdivisionIds.has(subdivision.id) || editedSubdivisionIds.size < 3)
   ) || [];
   const currentMonth = monthRange(timeMode, new Date(now));
+  const historicRange = historicPatrolRange(new Date(now));
+  const historicWeekOptions = weekRangesForHistory(timeMode, new Date(now));
+  const historicWindowPatrols = historicPatrols.filter(patrol => {
+    const start = new Date(patrol.startAt).getTime();
+    return start >= historicRange.start && start < historicRange.end;
+  });
+  const historicDepartmentOptions = historicWindowPatrols.reduce((items, patrol) =>
+    items.some(item => item.id === patrol.departmentId)
+      ? items
+      : [...items, { id: patrol.departmentId, name: patrol.departmentName }], []);
+  const selectedHistoricWeek = historicWeekOptions.find(week => week.value === historicWeekFilter);
+  const filteredHistoricPatrols = historicWindowPatrols.filter(patrol => {
+    const start = new Date(patrol.startAt).getTime();
+    return (!selectedHistoricWeek || (start >= selectedHistoricWeek.start && start < selectedHistoricWeek.end)) &&
+      (!historicDepartmentFilter || patrol.departmentId === historicDepartmentFilter);
+  });
   const monthlyEntries = entries.filter(entry =>
     new Date(entry.startAt).getTime() < currentMonth.end &&
     (!entry.endAt || new Date(entry.endAt).getTime() > currentMonth.start)
@@ -599,7 +659,15 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
   }, [activeEntry?.id, currentPatrolSegment?.subdivisionId, activePatrolDepartment?.id, canSwitchToDepartmentOnly, selectablePatrolSubdivisions.map(subdivision => subdivision.id).join('|')]);
 
   const totalWorked = progress.reduce((total, department) => total + department.worked, 0);
-  const totalRequired = progress.reduce((total, department) => total + Number(department.requiredHours || 0), 0);
+  const goalDepartments = progress.filter(department => Number(department.requiredHours || 0) > 0);
+  const totalRequired = goalDepartments.reduce((total, department) => total + Number(department.requiredHours || 0), 0);
+  const totalGoalCredit = goalDepartments.reduce((total, department) =>
+    total + Math.min(department.worked, Number(department.requiredHours || 0)), 0);
+  const allDepartmentGoalsFulfilled = goalDepartments.length > 0 &&
+    goalDepartments.every(department => department.worked >= Number(department.requiredHours || 0));
+  const totalTrackedDisplay = totalRequired > 0
+    ? (allDepartmentGoalsFulfilled ? totalWorked : totalGoalCredit)
+    : totalWorked;
   const departmentNameFor = entry => departments.find(department => department.id === entry.departmentId)?.name || entry.departmentName;
   const departmentColorFor = entry => departments.find(department => department.id === entry.departmentId)?.color || '#4a5568';
   const canFileDojEntry = entry => {
@@ -648,6 +716,18 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     const currentKey = monthKey(new Date(), timeMode);
     setLogMonthFilter(current => current === LOG_MONTH_ALL || availableLogMonths.includes(current) ? current : currentKey);
   }, [timeMode, entries.map(entry => entry.startAt).join('|')]);
+
+  useEffect(() => {
+    setHistoricWeekFilter(current => !current || historicWeekOptions.some(week => week.value === current)
+      ? current
+      : '');
+  }, [timeMode, historicWeekOptions.map(week => week.value).join('|')]);
+
+  useEffect(() => {
+    setHistoricDepartmentFilter(current => !current || historicDepartmentOptions.some(department => department.id === current)
+      ? current
+      : '');
+  }, [historicDepartmentOptions.map(department => department.id).join('|')]);
 
   const updateDepartmentDraft = (id, field, value) => setDepartments(current =>
     current.map(department => department.id === id ? { ...department, [field]: value } : department)
@@ -745,6 +825,19 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
     });
     await loadWorkspace();
   }, 'Department patrol ended.');
+  const kickPatrol = patrol => {
+    if (!window.confirm(`End ${adminPatrolName(patrol)}'s active ${patrol.departmentName} patrol?`)) return;
+    runAction(async () => {
+      await request(`/api/admin/active-patrols/${encodeURIComponent(patrol.username)}/${patrol.entryId}/clock-out`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      await Promise.all([
+        loadActivePatrols(),
+        patrol.username === auth.user.username ? loadWorkspace() : Promise.resolve()
+      ]);
+    }, 'Active patrol ended by admin.');
+  };
   const addManualEntry = event => {
     event.preventDefault();
     runAction(async () => {
@@ -1238,7 +1331,11 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
                 {activePatrolSegments.map((segment, index) => (
                   <div className={!segment.endAt ? 'active' : ''} key={segment.id}>
                     <strong>{index + 1}. {assignmentName(segment)}</strong>
-                    <small>{formatDateTime(segment.startAt, timeMode, clockFormat)} - {segment.endAt ? formatDateTime(segment.endAt, timeMode, clockFormat) : 'Active now'}</small>
+                    <small>
+                      {formatDateTime(segment.startAt, timeMode, clockFormat)} - {segment.endAt
+                        ? formatDateTime(segment.endAt, timeMode, clockFormat)
+                        : <span className="segment-duration">{formatDuration(durationHours(segment, now))} active</span>}
+                    </small>
                   </div>
                 ))}
               </div>
@@ -1291,7 +1388,7 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
           headerExtra={(
             <div className="panel-total">
               <strong>Total tracked</strong>
-              <ProgressBar worked={totalWorked} required={totalRequired} />
+              <ProgressBar worked={totalTrackedDisplay} required={totalRequired} />
             </div>
           )}
         >
@@ -1690,18 +1787,42 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
                   <div className="entry-hours">
                     <strong>{formatDuration(durationHours(patrol, now))}</strong>
                     <small>Total patrol duration</small>
+                    <button type="button" className="btn-delete patrol-kick-button" onClick={() => kickPatrol(patrol)}>Kick</button>
                   </div>
                 </div>
               ))}
             </div>
             <details className="historic-patrols">
               <summary>
-                <h3>Historic Patrols - Last 30 Days</h3>
-                <small>{historicPatrols.length} patrol{historicPatrols.length === 1 ? '' : 's'}</small>
+                <h3>
+                  <span>Historic Patrols</span>
+                  <span className="historic-window-label">Last 30 Days</span>
+                </h3>
+                <small>{filteredHistoricPatrols.length} patrol{filteredHistoricPatrols.length === 1 ? '' : 's'}</small>
               </summary>
+              <div className="log-filters historic-filters">
+                <div className="form-group">
+                  <label>Week</label>
+                  <select value={historicWeekFilter} onChange={event => setHistoricWeekFilter(event.target.value)}>
+                    <option value="">All weeks</option>
+                    {historicWeekOptions.map(week => (
+                      <option key={week.value} value={week.value}>{week.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Department</label>
+                  <select value={historicDepartmentFilter} onChange={event => setHistoricDepartmentFilter(event.target.value)}>
+                    <option value="">All departments</option>
+                    {historicDepartmentOptions.map(department => (
+                      <option key={department.id} value={department.id}>{department.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <div className="entry-list">
-                {historicPatrols.length === 0 && <p className="empty-text">No completed patrols recorded in the last 30 days.</p>}
-                {historicPatrols.map(patrol => (
+                {filteredHistoricPatrols.length === 0 && <p className="empty-text">No completed patrols recorded for the selected filters in the last 30 days.</p>}
+                {filteredHistoricPatrols.map(patrol => (
                   <div
                     className="entry-row"
                     key={patrol.entryId}
@@ -1850,6 +1971,7 @@ function Dashboard({ auth, onLogout, onAuthUpdate }) {
         {auth.user.role === 'admin' && (
           <div className="admin-management-grid">
           <CollapsiblePanel title="User Management" className="admin-card user-admin-card" open={adminPanelsOpen} onOpenChange={setAdminPanelsOpen}>
+            <MigrationPanel request={request} onLogout={onLogout} />
             <section className="compact-form registration-settings">
               <div>
                 <h3>Public Registration</h3>

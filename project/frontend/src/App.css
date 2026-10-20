@@ -213,6 +213,22 @@ body {
   padding: 1rem;
 }
 
+.migration-panel > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.migration-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.migration-content > p {
+  margin: 0;
+}
+
 .form-row {
   display: flex;
   flex-wrap: wrap;
@@ -430,6 +446,11 @@ button:disabled {
   color: #a0aec0;
 }
 
+.segment-duration {
+  color: #68d391;
+  font-weight: 800;
+}
+
 .patrol-switch {
   border-top: 1px dashed #2d3748;
   margin: 0.35rem 0;
@@ -617,6 +638,10 @@ button:disabled {
   gap: 0.5rem;
 }
 
+.patrol-kick-button {
+  margin-top: 0.15rem;
+}
+
 .entry-edit-form {
   display: flex;
   flex: 1;
@@ -681,6 +706,12 @@ button:disabled {
   display: none;
 }
 
+.historic-patrols > summary h3 {
+  align-items: baseline;
+  display: flex;
+  margin: 0;
+}
+
 .historic-patrols > summary h3::before {
   border-bottom: 5px solid transparent;
   border-left: 7px solid #90cdf4;
@@ -695,8 +726,21 @@ button:disabled {
   transform: rotate(90deg);
 }
 
+.historic-window-label {
+  border-left: 1px solid #a0aec0;
+  color: #a0aec0;
+  font-size: 0.82em;
+  font-weight: 500;
+  margin-left: 0.75rem;
+  padding-left: 0.75rem;
+}
+
 .historic-patrols > summary small {
   color: #718096;
+}
+
+.historic-patrols > .historic-filters {
+  margin-top: 1rem;
 }
 
 .historic-patrols > .entry-list {
