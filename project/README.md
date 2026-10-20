@@ -30,6 +30,7 @@ Default administrator credentials are `admin` / `admin123`. Change the password 
 - Team management with admin-defined join keys, user self-join, per-user team ordering, and configurable structure-edit permissions.
 - A locked `Department of Justice RP` (`DOJ`) team containing the default department catalog, alongside unrestricted `Personal Departments`.
 - Redis-backed persistence.
+- Administrator Data Transfer tools for full backup/restore and maintenance mode; see `../tracky cloud/README.md` for temporary Cloudflare hosting and round-trip migration.
 
 Ports can be changed with `TRACKY_PORT` and `TRACKY_API_PORT`.
 
