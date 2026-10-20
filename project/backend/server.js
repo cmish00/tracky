@@ -8,7 +8,9 @@ const { execFile } = require('child_process');
 const { createClient } = require('redis');
 
 const app = express();
-app.use(express.json({ limit: '200kb' }));
+const jsonParser = express.json({ limit: '200kb' });
+app.use((req, res, next) => req.path.startsWith('/api/admin/migration/')
+  ? next() : jsonParser(req, res, next));
 
 const PORTABLE_MODE = process.env.TRACKY_PORTABLE === '1' || Boolean(process.pkg);
 const PORT = parseInt(process.env.PORT || (PORTABLE_MODE ? '8765' : '3000'), 10);
@@ -154,6 +156,24 @@ const createLocalDataClient = filePath => {
       await write();
     },
     exists: async key => contains(key) ? 1 : 0,
+    trackyKeys: async () => Object.values(data).flatMap(bucket => Object.keys(bucket))
+      .filter(key => key.startsWith('tracky:') && key !== 'tracky:migration:maintenance').sort(),
+    type: async key => Object.prototype.hasOwnProperty.call(data.strings, key) ? 'string'
+      : Object.prototype.hasOwnProperty.call(data.hashes, key) ? 'hash'
+        : Object.prototype.hasOwnProperty.call(data.sets, key) ? 'set' : 'none',
+    trackyReplace: async records => {
+      const previous = structuredClone(data);
+      for (const bucket of Object.values(data)) {
+        for (const key of Object.keys(bucket)) {
+          if (key.startsWith('tracky:') && key !== 'tracky:migration:maintenance') delete bucket[key];
+        }
+      }
+      for (const record of records) {
+        const bucket = { string: 'strings', hash: 'hashes', set: 'sets' }[record.type];
+        data[bucket][record.key] = structuredClone(record.value);
+      }
+      try { await write(); } catch (error) { data = previous; throw error; }
+    },
     rename: async (source, destination) => {
       ['strings', 'hashes', 'sets'].forEach(bucket => {
         if (Object.prototype.hasOwnProperty.call(data[bucket], source)) {
@@ -736,6 +756,8 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+require('./migration').installMigration(app, dataClient, requireAuth, requireAdmin);
+
 const getDepartments = async username => {
   await initializeWorkspace(username);
   const user = await getUser(username);
@@ -803,6 +825,21 @@ const getEntries = async username => {
   return (await loadJson(entryKey(username), [])).map(normalizeEntry);
 };
 const saveEntries = (username, entries) => saveJson(entryKey(username), entries);
+const clockOutEntry = async (username, entryId, endAtValue) => {
+  const entries = await getEntries(username);
+  const entry = entries.find(item => item.id === entryId);
+  if (!entry) throw new HttpError(404, 'Shift not found.');
+  if (entry.endAt) throw new HttpError(409, 'This shift is already clocked out.');
+  const endAt = parseDate(endAtValue, 'Clock-out time');
+  if (new Date(endAt) <= new Date(entry.startAt)) {
+    throw new HttpError(400, 'Clock-out time must be after clock-in time.');
+  }
+  entry.endAt = endAt;
+  const activeSegment = entry.segments[entry.segments.length - 1];
+  if (activeSegment && !activeSegment.endAt) activeSegment.endAt = endAt;
+  await saveEntries(username, entries);
+  return entry;
+};
 const findDepartment = (departments, departmentId) => departments.find(department => department.id === departmentId);
 const findSubdivision = (department, subdivisionId) =>
   department?.subdivisions.find(subdivision => subdivision.id === subdivisionId);
@@ -912,7 +949,7 @@ const buildDojFormUrl = (entry, department, profile) => {
   if (config.type === 'lspd') {
     setOptionalFormValue(params, 'entry.998812919', formIdentity(profile, department));
     setOptionalFormValue(params, 'entry.699618360', profile.websiteId);
-    setFormValue(params, 'entry.952718778', 'UTC (GMT)');
+    setFormValue(params, 'entry.952718778', 'UTC -0 (GMT)');
     setFormValue(params, 'entry.1132611911', 'Patrol Log');
     setUtcDateFields(params, 'entry.1056448932', entry.startAt);
     setUtcDateFields(params, 'entry.483572440', entry.endAt);
@@ -1303,7 +1340,14 @@ app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async
   const viewer = await getUser(req.user.username);
   const viewerDepartments = await getDepartments(viewer.username);
   const canViewDojIdentity = userHasTeam(viewer, DOJ_TEAM_ID);
-  const historyCutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
+  const defaultHistoryEnd = Date.now() + 1;
+  const defaultHistoryStart = defaultHistoryEnd - (30 * 24 * 60 * 60 * 1000);
+  const requestedHistoryStart = Number(req.query.historyStart);
+  const requestedHistoryEnd = Number(req.query.historyEnd);
+  const historyStart = Number.isFinite(requestedHistoryStart) ? requestedHistoryStart : defaultHistoryStart;
+  const historyEnd = Number.isFinite(requestedHistoryEnd) && requestedHistoryEnd > historyStart
+    ? requestedHistoryEnd
+    : defaultHistoryEnd;
   const patrols = await Promise.all((await listUsers()).map(async user => {
     const [departments, entries] = await Promise.all([
       getDepartments(user.username),
@@ -1323,6 +1367,7 @@ app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async
         : '';
       return {
         entryId: entry.id,
+        departmentId: entry.departmentId,
         username: user.username,
         role: publicUser(user).role,
         departmentName: department?.name || entry.departmentName,
@@ -1339,7 +1384,10 @@ app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async
     return {
       active: entries.find(item => !item.endAt) ? summarize(entries.find(item => !item.endAt)) : null,
       historic: entries
-        .filter(entry => entry.endAt && new Date(entry.endAt).getTime() >= historyCutoff)
+        .filter(entry => {
+          const startedAt = new Date(entry.startAt).getTime();
+          return entry.endAt && startedAt >= historyStart && startedAt < historyEnd;
+        })
         .map(summarize)
     };
   }));
@@ -1353,6 +1401,13 @@ app.get('/api/admin/active-patrols', requireAuth, requireAdmin, asyncRoute(async
       .flatMap(item => item.historic)
       .sort((left, right) => new Date(right.endAt) - new Date(left.endAt))
   });
+}));
+
+app.post('/api/admin/active-patrols/:username/:entryId/clock-out', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  const username = validateUsername(req.params.username);
+  const user = await getUser(username);
+  if (!user) throw new HttpError(404, 'User not found.');
+  res.json(await clockOutEntry(username, req.params.entryId, req.body.endAt));
 }));
 
 app.post('/api/users', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
@@ -1646,19 +1701,7 @@ app.post('/api/entries', requireAuth, asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/entries/:entryId/clock-out', requireAuth, asyncRoute(async (req, res) => {
-  const entries = await getEntries(req.user.username);
-  const entry = entries.find(item => item.id === req.params.entryId);
-  if (!entry) throw new HttpError(404, 'Shift not found.');
-  if (entry.endAt) throw new HttpError(409, 'This shift is already clocked out.');
-  const endAt = parseDate(req.body.endAt, 'Clock-out time');
-  if (new Date(endAt) <= new Date(entry.startAt)) {
-    throw new HttpError(400, 'Clock-out time must be after clock-in time.');
-  }
-  entry.endAt = endAt;
-  const activeSegment = entry.segments[entry.segments.length - 1];
-  if (activeSegment && !activeSegment.endAt) activeSegment.endAt = endAt;
-  await saveEntries(req.user.username, entries);
-  res.json(entry);
+  res.json(await clockOutEntry(req.user.username, req.params.entryId, req.body.endAt));
 }));
 
 app.post('/api/entries/:entryId/resume', requireAuth, asyncRoute(async (req, res) => {
